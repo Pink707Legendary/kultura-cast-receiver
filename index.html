@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KULTURA — Ambient Gallery</title>
+  <link rel="stylesheet" href="css/receiver.css">
+</head>
+<body>
+  <!-- Background fill — shows mainColor for portrait artworks on landscape TV -->
+  <div id="background"></div>
+
+  <!-- Two layers for cross-dissolve transitions -->
+  <div id="layer-a" class="artwork-layer">
+    <img class="artwork-image" alt="">
+    <div class="metadata-overlay">
+      <div class="metadata-title"></div>
+      <div class="metadata-artist"></div>
+    </div>
+  </div>
+
+  <div id="layer-b" class="artwork-layer">
+    <img class="artwork-image" alt="">
+    <div class="metadata-overlay">
+      <div class="metadata-title"></div>
+      <div class="metadata-artist"></div>
+    </div>
+  </div>
+
+  <!-- Idle screen before manifest arrives -->
+  <div id="idle-screen">
+    <div class="idle-title">KULTURA</div>
+    <div class="idle-subtitle">Waiting for artworks&hellip;</div>
+  </div>
+
+  <!-- Google Cast Web Receiver SDK -->
+  <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <script src="js/receiver.js"></script>
+</body>
+</html>
