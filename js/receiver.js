@@ -1,338 +1,309 @@
 /**
- * KULTURA Cast Receiver — Ken Burns Ambient Gallery Engine
+ * KULTURA Cast Receiver — Ambient Gallery engine.
  *
- * Receives a manifest of artworks from the phone via Google Cast custom channel,
- * then cycles through them with cinematic Ken Burns animations:
- *   1. Cross-dissolve fade in (2s)
- *   2. Full view with gentle drift (8s)
- *   3. Zoom to AI crop region (12s)
- *   4. Hold on detail (8s)
- *   5. Pull back to full view (7s)
- *   6. Show metadata card (8s)
+ * The phone sends a list of artworks (in batches) over the Google Cast custom channel; the TV
+ * then plays them on its own, so the slideshow keeps going when the phone sleeps or leaves.
  *
- * Total per artwork: ~45s
+ * Each artwork is one "slide": the image cross-fades in, then a single Web Animation moves the
+ * camera (gentle breath -> glide into the AI-crop detail -> linger -> pull back) while a second
+ * animation fades the caption in near the end. Both animations share the slide duration
+ * (secondsPerArtwork), so:
+ *   - Pause/Resume is animation.pause()/play(): motion freezes exactly and resumes in place.
+ *   - Changing the speed rescales the running slide without a jump.
+ *   - The slide advances when its animation finishes (no separate timers to get out of sync).
+ *
+ * Geometry lives in motion.js, message validation in protocol.js; both are unit-tested.
+ * The message protocol is defined on the phone side in types/cast.ts.
  */
-
 (function () {
   "use strict";
 
-  // ─── Constants ───
-  const NAMESPACE = "urn:x-cast:art.kultura.cast";
-  const PRELOAD_AHEAD = 2;
+  var RECEIVER_VERSION = "2.0.0";
+  var NAMESPACE = "urn:x-cast:art.kultura.cast";
+  var PRELOAD_AHEAD = 2;
+  var IMAGE_LOAD_TIMEOUT_MS = 15000;
 
-  // Phase durations (ms)
-  const PHASE = {
-    FADE_IN: 2000,
-    FULL_VIEW: 8000,
-    ZOOM_TO_CROP: 12000,
-    HOLD_DETAIL: 8000,
-    PULL_BACK: 7000,
-    METADATA: 8000,
-  };
+  var Motion = window.KulturaMotion;
+  var Protocol = window.KulturaProtocol;
 
   // ─── DOM refs ───
-  const bgEl = document.getElementById("background");
-  const layerA = document.getElementById("layer-a");
-  const layerB = document.getElementById("layer-b");
-  const idleScreen = document.getElementById("idle-screen");
+  var bgEl = document.getElementById("background");
+  var layers = { a: document.getElementById("layer-a"), b: document.getElementById("layer-b") };
+  var idleScreen = document.getElementById("idle-screen");
+  var idleSubtitle = idleScreen.querySelector(".idle-subtitle");
 
   // ─── State ───
-  let manifest = [];
-  let artistName = "";
-  let currentIndex = 0;
-  let isPaused = false;
-  let activeLayer = "a"; // toggles between "a" and "b"
-  let phaseTimer = null;
-  let castContext = null;
-  let lastSenderId = undefined;
+  var artworks = [];
+  var sourceName = "";
+  var currentIndex = 0;
+  var isPaused = false;
+  var secondsPerArtwork = Protocol.DEFAULT_SECONDS;
+  var activeLayerId = "a";
+  /** Incremented for every slide change; stale image loads compare against it and give up. */
+  var slideToken = 0;
+  /** Animations of the slide currently on screen: { image, caption } or null. */
+  var slideAnimations = null;
+  var consecutiveLoadFailures = 0;
+  var castContext = null;
 
-  // ─── Helpers ───
-
-  function getLayer(which) {
-    return which === "a" ? layerA : layerB;
+  function slideDurationMs() {
+    return secondsPerArtwork * 1000;
   }
 
-  function getInactiveLayer() {
-    return activeLayer === "a" ? "b" : "a";
+  function wrapIndex(index) {
+    var n = artworks.length;
+    return ((index % n) + n) % n;
   }
 
-  /**
-   * Calculate the CSS transform to zoom into the AI crop region.
-   * The crop coordinates are in the original image's pixel space (usually 2048px).
-   */
-  function calculateCropTransform(artwork) {
-    var crop = artwork.aiCrop;
-    if (!crop || (crop.xmin === 0 && crop.xmax === 0 && crop.ymin === 0 && crop.ymax === 0)) {
-      // No valid crop — gentle center zoom as fallback
-      return "scale(1.2)";
-    }
+  // ─── Status back to the phone(s) ───
 
-    var imgW = artwork.width || 2048;
-    var imgH = artwork.height || Math.round(2048 / (artwork.ratio || 1));
-
-    var cropW = crop.xmax - crop.xmin;
-    var cropH = crop.ymax - crop.ymin;
-
-    if (cropW <= 0 || cropH <= 0) return "scale(1.2)";
-
-    // How much to scale: fill the viewport with the crop region (with 15% breathing room)
-    var scaleX = imgW / cropW;
-    var scaleY = imgH / cropH;
-    var scale = Math.min(scaleX, scaleY) * 0.85;
-    // Cap the zoom to avoid extreme close-ups
-    scale = Math.min(scale, 4);
-
-    // Translate so the crop center is at the image center
-    var cropCenterX = (crop.xmin + crop.xmax) / 2;
-    var cropCenterY = (crop.ymin + crop.ymax) / 2;
-    var imgCenterX = imgW / 2;
-    var imgCenterY = imgH / 2;
-
-    // Translate in percentage of image dimensions (since transform-origin is center)
-    var translateX = ((imgCenterX - cropCenterX) / imgW) * 100;
-    var translateY = ((imgCenterY - cropCenterY) / imgH) * 100;
-
-    return "translate(" + translateX + "%, " + translateY + "%) scale(" + scale + ")";
-  }
-
-  /** Preload images for upcoming artworks. */
-  function preloadAhead() {
-    for (var i = 1; i <= PRELOAD_AHEAD; i++) {
-      var idx = (currentIndex + i) % manifest.length;
-      var img = new Image();
-      img.src = manifest[idx].imageUrl;
-    }
-  }
-
-  /** Send status back to the phone. */
   function sendStatus() {
     if (!castContext) return;
-
-    var artwork = manifest[currentIndex] || null;
+    var artwork = artworks[currentIndex] || null;
     var status = {
       type: "STATUS",
+      protocol: Protocol.PROTOCOL_VERSION,
+      receiverVersion: RECEIVER_VERSION,
       currentIndex: currentIndex,
       isPaused: isPaused,
-      totalArtworks: manifest.length,
+      totalArtworks: artworks.length,
       currentArtwork: artwork ? { id: artwork.id, title: artwork.title } : null,
+      secondsPerArtwork: secondsPerArtwork,
+      sourceName: sourceName,
     };
-
-    castContext.sendCustomMessage(NAMESPACE, lastSenderId, status);
-  }
-
-  // ─── Ken Burns Animation Sequence ───
-
-  function clearPhaseTimer() {
-    if (phaseTimer) {
-      clearTimeout(phaseTimer);
-      phaseTimer = null;
+    try {
+      // Undefined sender id broadcasts, so a second phone or a reconnecting phone stays in sync.
+      castContext.sendCustomMessage(NAMESPACE, undefined, status);
+    } catch (e) {
+      console.warn("[KULTURA] status send failed", e);
     }
   }
 
-  /**
-   * Show one artwork through the full Ken Burns sequence.
-   * Uses two layers (A and B) alternately for cross-dissolve transitions.
-   */
+  // ─── Images ───
+
+  function loadImage(img, url) {
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        reject(new Error("image load timeout"));
+      }, IMAGE_LOAD_TIMEOUT_MS);
+      img.onload = function () {
+        clearTimeout(timer);
+        resolve();
+      };
+      img.onerror = function () {
+        clearTimeout(timer);
+        reject(new Error("image load error"));
+      };
+      img.src = url;
+    });
+  }
+
+  function preloadAhead() {
+    for (var i = 1; i <= PRELOAD_AHEAD && i < artworks.length; i++) {
+      var preload = new Image();
+      preload.src = artworks[wrapIndex(currentIndex + i)].imageUrl;
+    }
+  }
+
+  /** Size the image to fit the screen (upscaling small images) and return its on-screen box. */
+  function fitImage(img) {
+    // Fall back to the physical screen if the page reports no viewport (e.g. a hidden tab).
+    var view = {
+      width: window.innerWidth || window.screen.width,
+      height: window.innerHeight || window.screen.height,
+    };
+    var fit = Math.min(view.width / img.naturalWidth, view.height / img.naturalHeight);
+    var box = { width: Math.round(img.naturalWidth * fit), height: Math.round(img.naturalHeight * fit) };
+    img.style.width = box.width + "px";
+    img.style.height = box.height + "px";
+    return { box: box, view: view };
+  }
+
+  // ─── Slides ───
+
+  function cancelLayerAnimations(layer) {
+    var animated = layer.querySelectorAll(".artwork-image, .metadata-overlay");
+    for (var i = 0; i < animated.length; i++) {
+      var running = animated[i].getAnimations ? animated[i].getAnimations() : [];
+      for (var j = 0; j < running.length; j++) running[j].cancel();
+    }
+  }
+
+  function showIdle(message) {
+    idleSubtitle.textContent = message;
+    idleScreen.classList.remove("hidden");
+  }
+
   function showArtwork(index) {
-    if (manifest.length === 0) return;
-    currentIndex = index % manifest.length;
-    var artwork = manifest[currentIndex];
+    if (artworks.length === 0) return;
+    currentIndex = wrapIndex(index);
+    var token = ++slideToken;
+    var artwork = artworks[currentIndex];
 
-    // Set background color (visible for portrait paintings on landscape TV)
-    bgEl.style.backgroundColor = artwork.mainColor || "#000";
+    var incomingId = activeLayerId === "a" ? "b" : "a";
+    var incoming = layers[incomingId];
+    var img = incoming.querySelector(".artwork-image");
+    var caption = incoming.querySelector(".metadata-overlay");
 
-    // Prepare the incoming layer
-    var incomingId = getInactiveLayer();
-    var incomingLayer = getLayer(incomingId);
-    var outgoingLayer = getLayer(activeLayer);
-    var img = incomingLayer.querySelector(".artwork-image");
-    var meta = incomingLayer.querySelector(".metadata-overlay");
-    var titleEl = meta.querySelector(".metadata-title");
-    var artistEl = meta.querySelector(".metadata-artist");
-
-    // Reset the incoming layer
-    meta.classList.remove("visible");
-    img.style.transition = "none";
-    img.style.transform = "scale(1)";
-    // Force reflow so the reset takes effect before we add transitions back
-    void img.offsetHeight;
-
-    // Load image
-    img.src = artwork.imageUrl;
-
-    // Phase 1: Cross-dissolve (2s)
-    incomingLayer.classList.add("active");
-    outgoingLayer.classList.remove("active");
-    activeLayer = incomingId;
-
+    cancelLayerAnimations(incoming);
     sendStatus();
-    preloadAhead();
 
-    // Phase 2: Full view with gentle drift toward crop (8s)
-    phaseTimer = setTimeout(function () {
-      if (isPaused) return waitForResume(phase3);
-      img.style.transition = "transform " + (PHASE.FULL_VIEW / 1000) + "s cubic-bezier(0.25, 0.1, 0.25, 1.0)";
-      // Gentle drift: very slight move toward the crop area
-      img.style.transform = "scale(1.03)";
-
-      phaseTimer = setTimeout(function () {
-        if (isPaused) return waitForResume(phase3);
-        phase3();
-      }, PHASE.FULL_VIEW);
-    }, PHASE.FADE_IN);
-
-    function phase3() {
-      // Phase 3: Zoom to AI crop (12s)
-      var cropTransform = calculateCropTransform(artwork);
-      img.style.transition = "transform " + (PHASE.ZOOM_TO_CROP / 1000) + "s cubic-bezier(0.25, 0.1, 0.25, 1.0)";
-      img.style.transform = cropTransform;
-
-      phaseTimer = setTimeout(function () {
-        if (isPaused) return waitForResume(phase4);
-        phase4();
-      }, PHASE.ZOOM_TO_CROP);
-    }
-
-    function phase4() {
-      // Phase 4: Hold on detail (8s) — subtle continued drift
-      img.style.transition = "transform " + (PHASE.HOLD_DETAIL / 1000) + "s linear";
-      // Tiny additional scale for subtle movement during hold
-      var currentTransform = img.style.transform;
-      // Not parsing — just add a tiny nudge by keeping the same transform
-      // (the visual effect is the transition easing settling)
-
-      phaseTimer = setTimeout(function () {
-        if (isPaused) return waitForResume(phase5);
-        phase5();
-      }, PHASE.HOLD_DETAIL);
-    }
-
-    function phase5() {
-      // Phase 5: Pull back to full view (7s)
-      img.style.transition = "transform " + (PHASE.PULL_BACK / 1000) + "s cubic-bezier(0.25, 0.1, 0.25, 1.0)";
-      img.style.transform = "scale(1)";
-
-      phaseTimer = setTimeout(function () {
-        if (isPaused) return waitForResume(phase6);
-        phase6();
-      }, PHASE.PULL_BACK);
-    }
-
-    function phase6() {
-      // Phase 6: Metadata card (8s)
-      titleEl.textContent = artwork.title || "";
-      artistEl.textContent = artistName || "";
-      meta.classList.add("visible");
-
-      phaseTimer = setTimeout(function () {
-        if (isPaused) return waitForResume(nextArtwork);
-        nextArtwork();
-      }, PHASE.METADATA);
-    }
-
-    function nextArtwork() {
-      meta.classList.remove("visible");
-      showArtwork(currentIndex + 1);
-    }
-  }
-
-  /** When paused mid-phase, store the continuation and wait. */
-  var resumeCallback = null;
-
-  function waitForResume(callback) {
-    resumeCallback = callback;
-  }
-
-  function resume() {
-    isPaused = false;
-    sendStatus();
-    if (resumeCallback) {
-      var cb = resumeCallback;
-      resumeCallback = null;
-      cb();
-    }
-  }
-
-  // ─── Public Commands ───
-
-  function handleMessage(event) {
-    var data = event.data;
-    if (typeof data === "string") {
-      try { data = JSON.parse(data); } catch (e) { return; }
-    }
-
-    switch (data.type) {
-      case "LOAD_MANIFEST":
-        manifest = data.artworks || [];
-        artistName = data.artistName || "";
-        currentIndex = 0;
-        isPaused = false;
-        resumeCallback = null;
-        clearPhaseTimer();
-
-        if (manifest.length > 0) {
-          idleScreen.classList.add("hidden");
-          showArtwork(0);
+    loadImage(img, artwork.imageUrl).then(
+      function () {
+        if (token !== slideToken) return; // the user skipped while this was loading
+        consecutiveLoadFailures = 0;
+        startSlide(artwork, incoming, incomingId, img, caption, token);
+      },
+      function (err) {
+        if (token !== slideToken) return;
+        console.warn("[KULTURA] skipping artwork " + artwork.id + ": " + err.message);
+        consecutiveLoadFailures++;
+        if (consecutiveLoadFailures >= artworks.length) {
+          showIdle("Couldn't load the artworks. Check the TV's internet connection.");
+          return;
         }
-        break;
-
-      case "NEXT":
-        clearPhaseTimer();
-        resumeCallback = null;
-        isPaused = false;
         showArtwork(currentIndex + 1);
-        break;
+      }
+    );
+  }
 
-      case "PREVIOUS":
-        clearPhaseTimer();
-        resumeCallback = null;
+  function startSlide(artwork, incoming, incomingId, img, caption, token) {
+    var outgoing = layers[activeLayerId];
+    var geometry = fitImage(img);
+
+    caption.querySelector(".metadata-title").textContent = artwork.title;
+    caption.querySelector(".metadata-artist").textContent = artwork.artist || sourceName;
+
+    var timing = { duration: slideDurationMs(), fill: "forwards" };
+    var imageAnimation = img.animate(
+      Motion.buildKeyframes(artwork.focus, geometry.box, geometry.view, currentIndex),
+      timing
+    );
+    var captionAnimation = caption.animate(Motion.CAPTION_KEYFRAMES, timing);
+    if (isPaused) {
+      imageAnimation.pause();
+      captionAnimation.pause();
+    }
+    imageAnimation.onfinish = function () {
+      if (token === slideToken) showArtwork(currentIndex + 1);
+    };
+    slideAnimations = { image: imageAnimation, caption: captionAnimation };
+
+    bgEl.style.backgroundColor = artwork.mainColor;
+    incoming.classList.add("active");
+    outgoing.classList.remove("active");
+    activeLayerId = incomingId;
+    idleScreen.classList.add("hidden");
+
+    preloadAhead();
+  }
+
+  // ─── Commands ───
+
+  function setPaused(paused) {
+    isPaused = paused;
+    if (slideAnimations) {
+      if (paused) {
+        slideAnimations.image.pause();
+        slideAnimations.caption.pause();
+      } else {
+        slideAnimations.image.play();
+        slideAnimations.caption.play();
+      }
+    }
+    sendStatus();
+  }
+
+  /** Change the slide length, keeping the running slide at the same point of its choreography. */
+  function setSecondsPerArtwork(seconds) {
+    secondsPerArtwork = seconds;
+    if (slideAnimations) {
+      var anims = [slideAnimations.image, slideAnimations.caption];
+      for (var i = 0; i < anims.length; i++) {
+        var anim = anims[i];
+        var oldDuration = anim.effect.getTiming().duration;
+        var progress = oldDuration > 0 ? (anim.currentTime || 0) / oldDuration : 0;
+        anim.effect.updateTiming({ duration: slideDurationMs() });
+        anim.currentTime = progress * slideDurationMs();
+      }
+    }
+    sendStatus();
+  }
+
+  function handleMessage(data) {
+    var command = Protocol.parseMessage(data);
+    if (!command) return;
+
+    switch (command.type) {
+      case "LOAD_MANIFEST":
+        artworks = command.artworks;
+        sourceName = command.sourceName;
+        if (command.secondsPerArtwork) secondsPerArtwork = command.secondsPerArtwork;
         isPaused = false;
-        showArtwork(currentIndex - 1 + manifest.length);
+        consecutiveLoadFailures = 0;
+        showArtwork(0);
         break;
-
-      case "PAUSE":
-        isPaused = true;
-        clearPhaseTimer();
+      case "APPEND_ARTWORKS":
+        artworks = artworks.concat(command.artworks);
         sendStatus();
         break;
-
+      case "SET_SETTINGS":
+        setSecondsPerArtwork(command.secondsPerArtwork);
+        break;
+      case "NEXT":
+        showArtwork(currentIndex + 1);
+        break;
+      case "PREVIOUS":
+        showArtwork(currentIndex - 1);
+        break;
+      case "PAUSE":
+        setPaused(true);
+        break;
       case "RESUME":
-        resume();
+        setPaused(false);
+        break;
+      case "GET_STATUS":
+        sendStatus();
         break;
     }
   }
 
-  // ─── Cast SDK Initialization ───
+  // ─── Cast SDK ───
 
   function initCast() {
     if (typeof cast === "undefined" || !cast.framework) {
-      console.log("[KULTURA] Cast SDK not available — running in dev mode");
+      console.log("[KULTURA] Cast SDK not available: running in dev mode");
       return;
     }
-
     castContext = cast.framework.CastReceiverContext.getInstance();
-
     castContext.addCustomMessageListener(NAMESPACE, function (event) {
-      if (event.senderId) lastSenderId = event.senderId;
-      handleMessage(event);
+      handleMessage(event.data);
+    });
+    castContext.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function () {
+      sendStatus();
     });
 
     var options = new cast.framework.CastReceiverOptions();
     options.disableIdleTimeout = true;
-
     castContext.start(options);
-    console.log("[KULTURA] Cast receiver started");
+    console.log("[KULTURA] Cast receiver " + RECEIVER_VERSION + " started");
   }
 
-  // ─── Expose for dev mode ───
+  // ─── Dev mode hooks (dev.html drives the engine without a TV) ───
   window.kulturaReceiver = {
     handleMessage: handleMessage,
     getState: function () {
-      return { manifest: manifest, currentIndex: currentIndex, isPaused: isPaused, artistName: artistName };
+      return {
+        receiverVersion: RECEIVER_VERSION,
+        totalArtworks: artworks.length,
+        currentIndex: currentIndex,
+        isPaused: isPaused,
+        secondsPerArtwork: secondsPerArtwork,
+        sourceName: sourceName,
+        progress: slideAnimations ? slideAnimations.image.currentTime / slideDurationMs() : null,
+      };
     },
   };
 
-  // ─── Boot ───
   initCast();
-
 })();
