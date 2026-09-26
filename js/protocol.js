@@ -51,6 +51,8 @@
     if (!raw || typeof raw !== "object") return null;
     if (!isFiniteNumber(raw.id) || !isAllowedImageUrl(raw.imageUrl)) return null;
     var colour = typeof raw.mainColor === "string" && /^#[0-9a-fA-F]{3,8}$/.test(raw.mainColor) ? raw.mainColor : "#000000";
+    // The API sends Android-style #AARRGGBB; CSS would read that as #RRGGBBAA. Keep the RGB part.
+    if (colour.length === 9) colour = "#" + colour.slice(3);
     return {
       id: raw.id,
       title: shortText(raw.title, 200),
