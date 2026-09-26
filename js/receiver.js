@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.0.0";
+  var RECEIVER_VERSION = "2.0.2";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   var IMAGE_LOAD_TIMEOUT_MS = 15000;
@@ -45,6 +45,30 @@
   var slideAnimations = null;
   var consecutiveLoadFailures = 0;
   var castContext = null;
+  /** For diagnostics in STATUS: "idle" | "loading" | "playing" | "failed". */
+  var slidePhase = "idle";
+  var lastError = null;
+
+  window.addEventListener("error", function (event) {
+    lastError = String(event.message || event.error || "error").slice(0, 200);
+  });
+  window.addEventListener("unhandledrejection", function (event) {
+    lastError = ("promise: " + String(event.reason && event.reason.message || event.reason)).slice(0, 200);
+  });
+
+  /** Engine state sent with STATUS so a TV can be debugged from a phone or Mac. */
+  function diagnostics() {
+    var anim = slideAnimations && slideAnimations.image;
+    return {
+      phase: slidePhase,
+      visibility: document.visibilityState,
+      animationState: anim ? anim.playState : null,
+      animationTimeMs: anim && anim.currentTime != null ? Math.round(anim.currentTime) : null,
+      timelineMs: document.timeline ? Math.round(document.timeline.currentTime || 0) : null,
+      lastError: lastError,
+      userAgent: navigator.userAgent.slice(0, 160),
+    };
+  }
 
   function slideDurationMs() {
     return secondsPerArtwork * 1000;
@@ -70,6 +94,7 @@
       currentArtwork: artwork ? { id: artwork.id, title: artwork.title } : null,
       secondsPerArtwork: secondsPerArtwork,
       sourceName: sourceName,
+      debug: diagnostics(),
     };
     try {
       // Undefined sender id broadcasts, so a second phone or a reconnecting phone stays in sync.
@@ -146,6 +171,7 @@
     var caption = incoming.querySelector(".metadata-overlay");
 
     cancelLayerAnimations(incoming);
+    slidePhase = "loading";
     sendStatus();
 
     loadImage(img, artwork.imageUrl).then(
@@ -158,7 +184,9 @@
         if (token !== slideToken) return;
         console.warn("[KULTURA] skipping artwork " + artwork.id + ": " + err.message);
         consecutiveLoadFailures++;
+        lastError = "image " + artwork.id + ": " + err.message;
         if (consecutiveLoadFailures >= artworks.length) {
+          slidePhase = "failed";
           showIdle("Couldn't load the artworks. Check the TV's internet connection.");
           return;
         }
@@ -170,6 +198,7 @@
   function startSlide(artwork, incoming, incomingId, img, caption, token) {
     var outgoing = layers[activeLayerId];
     var geometry = fitImage(img);
+    slidePhase = "playing";
 
     caption.querySelector(".metadata-title").textContent = artwork.title;
     caption.querySelector(".metadata-artist").textContent = artwork.artist || sourceName;
