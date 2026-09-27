@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KULTURA TV Backdrops</title>
+<style>
+  :root { --bg: #111; --fg: #eee; --muted: #999; --chip: #222; --chip-on: #eee; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font-family: Inter, -apple-system, "Segoe UI", sans-serif; padding: 24px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  p.lede { color: var(--muted); font-size: 14px; margin-bottom: 18px; max-width: 70ch; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; align-items: center; }
+  .controls span { color: var(--muted); font-size: 13px; margin-right: 4px; }
+  button { background: var(--chip); color: var(--fg); border: 1px solid #333; border-radius: 16px; padding: 7px 14px; font: inherit; font-size: 13px; cursor: pointer; }
+  button.on { background: var(--chip-on); color: #111; border-color: var(--chip-on); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 18px; }
+  .card figcaption { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .card figcaption b { color: var(--fg); font-weight: 600; }
+  .tv { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 6px; background-blend-mode: multiply;
+        background-size: 34% auto; background-repeat: repeat; box-shadow: 0 0 0 1px #2a2a2a; }
+  .tv img { position: absolute; top: 0; left: 50%; height: 100%; transform: translateX(-50%); box-shadow: 0 4px 18px rgba(0,0,0,.35); }
+</style>
+</head>
+<body>
+  <h1>TV backdrops behind portrait paintings</h1>
+  <p class="lede">Six neutral textures, each tinted with a muted version of the painting's own colour. "Auto" picks a dark
+  fabric for dark paintings and a light mat for light ones. Each card is a small 16:9 TV screen.</p>
+  <div class="controls" id="paintings"><span>Painting</span></div>
+  <div class="controls" id="moods"><span>Mood</span></div>
+  <div class="grid" id="grid"></div>
+
+  <script src="js/backdrop.js"></script>
+  <script>
+    var PAINTINGS = [
+  {
+    "id": 12247,
+    "title": "Portrait of Friederike Maria Beer",
+    "artist": "Gustav Klimt",
+    "date": "1916",
+    "imageUrl": "https://d3bptqubukeepm.cloudfront.net/artwork/resize-webp/373_1600816371882_1720_1320_80.webp",
+    "mainColor": "#ff56402f",
+    "ratio": 0.766
+  },
+  {
+    "id": 9398,
+    "title": "Irises",
+    "artist": "Claude Monet",
+    "date": "about 1914-17",
+    "imageUrl": "https://d3bptqubukeepm.cloudfront.net/artwork/resize-webp/582_NG6383_1757_1320_80.webp",
+    "mainColor": "#ff3c5643",
+    "ratio": 0.75
+  },
+  {
+    "id": 5238,
+    "title": "Rouen Cathedral, West Façade",
+    "artist": "Claude Monet",
+    "date": "1894",
+    "imageUrl": "https://d3bptqubukeepm.cloudfront.net/artwork/resize-webp/444_Rouen_Cathedral_West_Fa_ade_149347_2040_1320_80.webp",
+    "mainColor": "#ff676b76",
+    "ratio": 0.641
+  },
+  {
+    "id": 1085,
+    "title": "Woman writing a letter, with her maid",
+    "artist": "Johannes Vermeer",
+    "date": "1671",
+    "imageUrl": "https://d3bptqubukeepm.cloudfront.net/artwork/resize-webp/1562427151057lq18_1603_1320_80.webp",
+    "mainColor": "#ff100e0d",
+    "ratio": 0.828
+  }
+];
+    var NAMES = { "t1-linen": "Linen", "t2-matboard": "Mat board", "t3-canvas": "Canvas", "t4-felt": "Felt", "t5-plaster": "Plaster", "t6-silk": "Raw silk" };
+    var state = { painting: 0, mood: "auto" };
+
+    function chip(parent, label, isOn, onClick) {
+      var b = document.createElement("button");
+      b.textContent = label;
+      if (isOn) b.className = "on";
+      b.onclick = onClick;
+      parent.appendChild(b);
+    }
+
+    function render() {
+      var p = document.getElementById("paintings");
+      p.querySelectorAll("button").forEach(function (b) { b.remove(); });
+      PAINTINGS.forEach(function (a, i) {
+        chip(p, a.artist + " – " + a.title, i === state.painting, function () { state.painting = i; render(); });
+      });
+      var m = document.getElementById("moods");
+      m.querySelectorAll("button").forEach(function (b) { b.remove(); });
+      ["auto", "light", "dark"].forEach(function (mood) {
+        chip(m, mood, mood === state.mood, function () { state.mood = mood; render(); });
+      });
+
+      var art = PAINTINGS[state.painting];
+      var grid = document.getElementById("grid");
+      grid.innerHTML = "";
+      KulturaBackdrop.TEXTURES.forEach(function (slug) {
+        var b = KulturaBackdrop.backdropFor(art.mainColor, slug, state.mood);
+        var fig = document.createElement("figure");
+        fig.className = "card";
+        fig.innerHTML = '<div class="tv"><img alt=""></div><figcaption><b>' + NAMES[slug] + "</b> · " + b.mood + " · tint " + b.tint + "</figcaption>";
+        var tv = fig.querySelector(".tv");
+        tv.style.backgroundColor = b.tint;
+        tv.style.backgroundImage = "url(textures/" + slug + ".webp)";
+        fig.querySelector("img").src = art.imageUrl;
+        grid.appendChild(fig);
+      });
+    }
+    render();
+  </script>
+</body>
+</html>

@@ -79,6 +79,15 @@
     return Math.max(MIN_SECONDS, Math.min(MAX_SECONDS, Math.round(value)));
   }
 
+  /** Backdrop setting: { texture: slug | "none", mood: "auto" | "light" | "dark" }; slugs are checked by backdrop.js. */
+  function readBackdrop(value) {
+    if (!value || typeof value !== "object") return null;
+    var texture = typeof value.texture === "string" && /^[a-z0-9-]{1,40}$/.test(value.texture) ? value.texture : null;
+    var mood = value.mood === "light" || value.mood === "dark" || value.mood === "auto" ? value.mood : null;
+    if (!texture && !mood) return null;
+    return { texture: texture, mood: mood };
+  }
+
   /**
    * Parse one incoming message into a validated command, or null to ignore it.
    * Accepts either a JSON string or an already-parsed object (the Cast SDK delivers both).
@@ -110,7 +119,12 @@
       }
       case "SET_SETTINGS": {
         var seconds = readSeconds(data.secondsPerArtwork);
-        return seconds ? { type: "SET_SETTINGS", secondsPerArtwork: seconds } : null;
+        var backdrop = readBackdrop(data.backdrop);
+        if (!seconds && !backdrop) return null;
+        var settings = { type: "SET_SETTINGS" };
+        if (seconds) settings.secondsPerArtwork = seconds;
+        if (backdrop) settings.backdrop = backdrop;
+        return settings;
       }
       case "NEXT":
       case "PREVIOUS":

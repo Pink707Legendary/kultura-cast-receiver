@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.3.0";
+  var RECEIVER_VERSION = "2.4.0";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**
@@ -30,6 +30,7 @@
 
   var Motion = window.KulturaMotion;
   var Protocol = window.KulturaProtocol;
+  var Backdrop = window.KulturaBackdrop;
 
   // ─── DOM refs ───
   var bgEl = document.getElementById("background");
@@ -43,6 +44,8 @@
   var currentIndex = 0;
   var isPaused = false;
   var secondsPerArtwork = Protocol.DEFAULT_SECONDS;
+  var backdropTexture = Backdrop.DEFAULT_TEXTURE;
+  var backdropMood = "auto";
   var activeLayerId = "a";
   /** Incremented for every slide change; stale image loads compare against it and give up. */
   var slideToken = 0;
@@ -150,6 +153,7 @@
       currentArtwork: artwork ? { id: artwork.id, title: artwork.title } : null,
       secondsPerArtwork: secondsPerArtwork,
       sourceName: sourceName,
+      backdrop: { texture: backdropTexture, mood: backdropMood },
       debug: diagnostics(),
     };
     try {
@@ -279,7 +283,7 @@
     };
     slideAnimations = { image: imageAnimation, caption: captionAnimation };
 
-    bgEl.style.backgroundColor = artwork.mainColor;
+    applyBackdrop(artwork);
     incoming.classList.add("active");
     outgoing.classList.remove("active");
     activeLayerId = incomingId;
@@ -287,6 +291,13 @@
     requestWakeLock();
 
     preloadAhead();
+  }
+
+  /** Textured, tinted backdrop behind paintings that don't fill the screen (see backdrop.js). */
+  function applyBackdrop(artwork) {
+    var b = Backdrop.backdropFor(artwork.mainColor, backdropTexture, backdropMood);
+    bgEl.style.backgroundColor = b.tint;
+    bgEl.style.backgroundImage = b.texture ? "url(textures/" + b.texture + ".webp)" : "none";
   }
 
   // ─── Commands ───
@@ -342,7 +353,13 @@
         sendStatus();
         break;
       case "SET_SETTINGS":
-        setSecondsPerArtwork(command.secondsPerArtwork);
+        if (command.backdrop) {
+          if (command.backdrop.texture) backdropTexture = command.backdrop.texture;
+          if (command.backdrop.mood) backdropMood = command.backdrop.mood;
+          if (artworks[currentIndex]) applyBackdrop(artworks[currentIndex]);
+        }
+        if (command.secondsPerArtwork) setSecondsPerArtwork(command.secondsPerArtwork);
+        else sendStatus();
         break;
       case "NEXT":
         showArtwork(currentIndex + 1);

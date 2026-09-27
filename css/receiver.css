@@ -20,6 +20,11 @@ html, body {
   inset: 0;
   z-index: 0;
   background: #000;
+  /* Tinted texture (receiver.js applyBackdrop): the tint multiplies the neutral grain. 512 CSS px
+     = 1024 real px on the TV's 2x display, i.e. one texture pixel per screen pixel. */
+  background-size: 512px auto;
+  background-repeat: repeat;
+  background-blend-mode: multiply;
   transition: background-color 2s ease-in-out;
 }
 
