@@ -6,7 +6,7 @@
  *
  * Coordinate conventions:
  *  - focus: the AI-crop "interesting region" as FRACTIONS of the image (0..1), or null.
- *  - box:   the on-screen size of the displayed image element, in CSS pixels.
+ *  - box:   the on-screen size of the whole painting fitted inside the screen, in CSS pixels.
  *  - view:  the TV viewport size, in CSS pixels.
  *  - A camera pose is { scale, x, y }: CSS `translate(x px, y px) scale(scale)` applied with
  *    transform-origin at the image centre. A point p (px from the image centre) lands at
@@ -15,14 +15,11 @@
 (function (root) {
   "use strict";
 
-  /** Largest zoom: served images are ~1300-2048px, so deeper zooms look soft on a TV. */
-  var MAX_SCALE = 2.4;
-  /** Smallest zoom into a detail, so every artwork gets a visible move. */
-  var MIN_FOCUS_SCALE = 1.25;
-  /** Breathing room around the focus region (0.85 = region fills 85% of the screen). */
-  var FOCUS_FILL = 0.85;
-  /** Gentle zoom for artworks without a focus region. */
-  var DRIFT_SCALE = 1.12;
+  /** Deepest zoom relative to "painting fills the screen". */
+  var DETAIL_ZOOM = 2.1;
+  /** How far past 1 image pixel per screen pixel we accept before the detail looks soft. */
+  var MAX_UPSCALE = 1.35;
+  var ABSOLUTE_MAX_SCALE = 5;
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -57,30 +54,29 @@
     };
   }
 
-  /** Camera pose that frames the focus region in the middle of the screen. */
-  function focusPose(focus, box, view) {
-    var regionW = (focus.x1 - focus.x0) * box.width;
-    var regionH = (focus.y1 - focus.y0) * box.height;
-    var scale = Math.min(view.width / regionW, view.height / regionH) * FOCUS_FILL;
-    scale = clamp(scale, MIN_FOCUS_SCALE, MAX_SCALE);
-
-    var centreX = ((focus.x0 + focus.x1) / 2 - 0.5) * box.width;
-    var centreY = ((focus.y0 + focus.y1) / 2 - 0.5) * box.height;
-    return clampPose({ scale: scale, x: -scale * centreX, y: -scale * centreY }, box, view);
+  /** Scale at which the painting fills the whole screen (cropping its edges), never below 1. */
+  function coverScale(box, view) {
+    return Math.max(1, view.width / box.width, view.height / box.height);
   }
 
-  /** Four drift directions for artworks without a focus region, chosen by position in the list. */
-  var DRIFTS = [
-    { from: [-1, 0], to: [1, 0] },
-    { from: [1, 0], to: [-1, 0] },
-    { from: [0, -1], to: [0, 1] },
-    { from: [0, 1], to: [0, -1] },
-  ];
+  /** Pose that puts image point (fx, fy) (fractions) at the screen centre, clamped to the edges. */
+  function poseAt(fx, fy, scale, box, view) {
+    return clampPose({ scale: scale, x: -scale * (fx - 0.5) * box.width, y: -scale * (fy - 0.5) * box.height }, box, view);
+  }
 
-  function driftPose(direction, box, view) {
-    var limX = maxShift(DRIFT_SCALE, box.width, view.width);
-    var limY = maxShift(DRIFT_SCALE, box.height, view.height);
-    return { scale: DRIFT_SCALE, x: direction[0] * limX, y: direction[1] * limY };
+  /** Detail zoom: about twice "fill the screen", limited by the image's real resolution. */
+  function detailScale(cover, box, sourceWidth) {
+    var sharpLimit = sourceWidth > 0 ? (sourceWidth / box.width) * MAX_UPSCALE : cover * 1.4;
+    var limit = Math.min(ABSOLUTE_MAX_SCALE, Math.max(cover * 1.25, sharpLimit));
+    return Math.min(cover * DETAIL_ZOOM, limit);
+  }
+
+  /** Where to dive in: the AI crop's subject area if we have one, else slightly above centre. */
+  function detailPoint(focus) {
+    if (isUsableFocus(focus)) {
+      return { x: (focus.x0 + focus.x1) / 2, y: focus.y0 + 0.4 * (focus.y1 - focus.y0) };
+    }
+    return { x: 0.5, y: 0.42 };
   }
 
   function poseToTransform(pose) {
@@ -90,56 +86,58 @@
   var REST = { scale: 1, x: 0, y: 0 };
 
   /**
-   * Keyframes for one artwork's whole screen time. Offsets are fractions of the slide duration,
-   * so the same choreography stretches from a 20 s slide to a slow 5 min drift.
-   *
-   * With a focus region: rest -> gentle breath -> glide into the detail -> linger (slight
-   * push-in) -> pull back -> rest while the caption shows.
-   * Without one: a slow continuous drift across the painting.
+   * Keyframes for one artwork's whole screen time (Ken Burns). Offsets are fractions of the slide,
+   * so the same choreography stretches from a 20 s slide to a slow 5 min drift:
+   *   0-30%   the painting fills the screen and the camera pans along it towards the detail
+   *   30-55%  push in to the detail (as deep as the image resolution allows)
+   *   55-72%  drift slowly across the detail
+   *   72-88%  pull back to the whole painting
+   *   88-100% hold the whole painting while the caption shows
+   * sourceWidth is the image's real pixel width; slideIndex alternates the pan direction.
    */
-  function buildKeyframes(focus, box, view, slideIndex) {
-    if (isUsableFocus(focus)) {
-      var target = focusPose(focus, box, view);
-      var linger = clampPose({ scale: target.scale * 1.04, x: target.x * 1.04, y: target.y * 1.04 }, box, view);
-      var breath = { scale: 1.03, x: 0, y: 0 };
-      return [
-        { offset: 0, transform: poseToTransform(REST) },
-        { offset: 0.14, transform: poseToTransform(breath), easing: "ease-in-out" },
-        { offset: 0.46, transform: poseToTransform(target), easing: "ease-in-out" },
-        { offset: 0.66, transform: poseToTransform(linger), easing: "ease-in-out" },
-        { offset: 0.86, transform: poseToTransform(REST) },
-        { offset: 1, transform: poseToTransform(REST) },
-      ];
-    }
-    var driftIndex = Math.abs(slideIndex || 0) % DRIFTS.length;
-    var drift = DRIFTS[driftIndex];
-    var horizontal = drift.from[0] !== 0;
-    var slack = horizontal
-      ? maxShift(DRIFT_SCALE, box.width, view.width)
-      : maxShift(DRIFT_SCALE, box.height, view.height);
-    // No room to move on this axis (e.g. a portrait painting drifting sideways): use the other axis.
-    if (slack === 0) drift = DRIFTS[(driftIndex + 2) % DRIFTS.length];
+  function buildKeyframes(focus, box, view, slideIndex, sourceWidth) {
+    var cover = coverScale(box, view);
+    var detail = detailScale(cover, box, sourceWidth || 0);
+    var point = detailPoint(focus);
+
+    // Pan along the axis the filled painting overflows (portrait on a landscape TV: vertically),
+    // starting from the far end so the camera travels towards the detail.
+    var alongY = cover * box.height - view.height > cover * box.width - view.width;
+    var flip = Math.abs(slideIndex || 0) % 2 === 1;
+    var farEnd = function (v) {
+      return (v < 0.5) !== flip ? 1 : 0;
+    };
+    var nudge = function (v) {
+      return v + (v < 0.5 ? 0.08 : -0.08);
+    };
+    var start = alongY ? { x: point.x, y: farEnd(point.y) } : { x: farEnd(point.x), y: point.y };
+    var drift = alongY ? { x: point.x, y: nudge(point.y) } : { x: nudge(point.x), y: point.y };
+
     return [
-      { offset: 0, transform: poseToTransform(driftPose(drift.from, box, view)), easing: "ease-in-out" },
-      { offset: 1, transform: poseToTransform(driftPose(drift.to, box, view)) },
+      { offset: 0, transform: poseToTransform(poseAt(start.x, start.y, cover, box, view)), easing: "ease-in-out" },
+      { offset: 0.3, transform: poseToTransform(poseAt(point.x, point.y, cover, box, view)), easing: "ease-in-out" },
+      { offset: 0.55, transform: poseToTransform(poseAt(point.x, point.y, detail, box, view)), easing: "ease-in-out" },
+      { offset: 0.72, transform: poseToTransform(poseAt(drift.x, drift.y, detail, box, view)), easing: "ease-in-out" },
+      { offset: 0.88, transform: poseToTransform(REST) },
+      { offset: 1, transform: poseToTransform(REST) },
     ];
   }
 
-  /** Caption (title + artist) fades in for the last part of each slide. */
+  /** Caption (title + artist) fades in while the whole painting is shown at the end. */
   var CAPTION_KEYFRAMES = [
     { offset: 0, opacity: 0 },
-    { offset: 0.8, opacity: 0 },
-    { offset: 0.85, opacity: 1 },
-    { offset: 0.97, opacity: 1 },
+    { offset: 0.86, opacity: 0 },
+    { offset: 0.9, opacity: 1 },
+    { offset: 0.98, opacity: 1 },
     { offset: 1, opacity: 0 },
   ];
 
   var api = {
-    MAX_SCALE: MAX_SCALE,
-    MIN_FOCUS_SCALE: MIN_FOCUS_SCALE,
     isUsableFocus: isUsableFocus,
-    focusPose: focusPose,
     clampPose: clampPose,
+    coverScale: coverScale,
+    poseAt: poseAt,
+    detailScale: detailScale,
     buildKeyframes: buildKeyframes,
     CAPTION_KEYFRAMES: CAPTION_KEYFRAMES,
   };

@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.0.3";
+  var RECEIVER_VERSION = "2.1.0";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   var IMAGE_LOAD_TIMEOUT_MS = 15000;
@@ -96,6 +96,8 @@
       timelineMs: document.timeline ? Math.round(document.timeline.currentTime || 0) : null,
       lastError: lastError,
       wakeLock: wakeLockStatus,
+      viewport: window.innerWidth + "x" + window.innerHeight + "@" + window.devicePixelRatio,
+      screen: window.screen.width + "x" + window.screen.height,
       userAgent: navigator.userAgent.slice(0, 160),
     };
   }
@@ -235,7 +237,7 @@
 
     var timing = { duration: slideDurationMs(), fill: "forwards" };
     var imageAnimation = img.animate(
-      Motion.buildKeyframes(artwork.focus, geometry.box, geometry.view, currentIndex),
+      Motion.buildKeyframes(artwork.focus, geometry.box, geometry.view, currentIndex, img.naturalWidth),
       timing
     );
     var captionAnimation = caption.animate(Motion.CAPTION_KEYFRAMES, timing);
