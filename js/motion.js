@@ -123,12 +123,12 @@
     ];
   }
 
-  /** Caption (title + artist) fades in while the whole painting is shown at the end. */
+  /** Museum label (title, artist, year): fades in just after the painting appears, out before the next. */
   var CAPTION_KEYFRAMES = [
     { offset: 0, opacity: 0 },
-    { offset: 0.86, opacity: 0 },
-    { offset: 0.9, opacity: 1 },
-    { offset: 0.98, opacity: 1 },
+    { offset: 0.05, opacity: 0 },
+    { offset: 0.1, opacity: 1 },
+    { offset: 0.95, opacity: 1 },
     { offset: 1, opacity: 0 },
   ];
 

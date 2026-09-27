@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.1.1";
+  var RECEIVER_VERSION = "2.2.0";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   var IMAGE_LOAD_TIMEOUT_MS = 15000;
@@ -85,6 +85,23 @@
     sendStatus();
   });
 
+  // Frames per second over the last second, to spot stutter on slow TV graphics chips.
+  var fps = null;
+  (function measureFps() {
+    var frames = 0;
+    var windowStart = performance.now();
+    function tick(now) {
+      frames++;
+      if (now - windowStart >= 1000) {
+        fps = Math.round((frames * 1000) / (now - windowStart));
+        frames = 0;
+        windowStart = now;
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  })();
+
   /** Engine state sent with STATUS so a TV can be debugged from a phone or Mac. */
   function diagnostics() {
     var anim = slideAnimations && slideAnimations.image;
@@ -96,6 +113,7 @@
       timelineMs: document.timeline ? Math.round(document.timeline.currentTime || 0) : null,
       lastError: lastError,
       wakeLock: wakeLockStatus,
+      fps: fps,
       lastKey: typeof lastKey === "undefined" ? null : lastKey,
       viewport: window.innerWidth + "x" + window.innerHeight + "@" + window.devicePixelRatio,
       screen: window.screen.width + "x" + window.screen.height,
@@ -233,8 +251,10 @@
     var geometry = fitImage(img);
     slidePhase = "playing";
 
-    caption.querySelector(".metadata-title").textContent = artwork.title;
-    caption.querySelector(".metadata-artist").textContent = artwork.artist || sourceName;
+    // Some catalogue titles end with a stray full stop ("... Water Pitcher."); labels don't.
+    caption.querySelector(".metadata-title").textContent = artwork.title.replace(/([^.])\.$/, "$1");
+    var byline = artwork.artist || sourceName;
+    caption.querySelector(".metadata-artist").textContent = artwork.date ? byline + ", " + artwork.date : byline;
 
     var timing = { duration: slideDurationMs(), fill: "forwards" };
     var imageAnimation = img.animate(

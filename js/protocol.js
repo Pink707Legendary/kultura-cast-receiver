@@ -57,6 +57,7 @@
       id: raw.id,
       title: shortText(raw.title, 200),
       artist: shortText(raw.artist, 120),
+      date: shortText(raw.date, 40),
       imageUrl: raw.imageUrl,
       mainColor: colour,
       focus: readFocus(raw.focus),
