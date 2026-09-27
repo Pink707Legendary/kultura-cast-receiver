@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.0.2";
+  var RECEIVER_VERSION = "2.0.3";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   var IMAGE_LOAD_TIMEOUT_MS = 15000;
@@ -56,6 +56,35 @@
     lastError = ("promise: " + String(event.reason && event.reason.message || event.reason)).slice(0, 200);
   });
 
+  // ─── Keep the screen awake ───
+  // Without media playing, Google TV starts its own screensaver (Ambient mode) on top of this page,
+  // which hides it and freezes the animations. Ask for a screen wake lock while artworks are showing,
+  // and ask again whenever the page becomes visible (the browser drops the lock when hidden).
+  var wakeLock = null;
+  var wakeLockStatus = navigator.wakeLock ? "not requested" : "unsupported";
+
+  function requestWakeLock() {
+    if (!navigator.wakeLock || wakeLock || artworks.length === 0 || document.visibilityState !== "visible") return;
+    navigator.wakeLock.request("screen").then(
+      function (lock) {
+        wakeLock = lock;
+        wakeLockStatus = "held";
+        lock.addEventListener("release", function () {
+          wakeLock = null;
+          wakeLockStatus = "released";
+        });
+      },
+      function (err) {
+        wakeLockStatus = "refused: " + String(err && err.message || err).slice(0, 120);
+      }
+    );
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    requestWakeLock();
+    sendStatus();
+  });
+
   /** Engine state sent with STATUS so a TV can be debugged from a phone or Mac. */
   function diagnostics() {
     var anim = slideAnimations && slideAnimations.image;
@@ -66,6 +95,7 @@
       animationTimeMs: anim && anim.currentTime != null ? Math.round(anim.currentTime) : null,
       timelineMs: document.timeline ? Math.round(document.timeline.currentTime || 0) : null,
       lastError: lastError,
+      wakeLock: wakeLockStatus,
       userAgent: navigator.userAgent.slice(0, 160),
     };
   }
@@ -223,6 +253,7 @@
     outgoing.classList.remove("active");
     activeLayerId = incomingId;
     idleScreen.classList.add("hidden");
+    requestWakeLock();
 
     preloadAhead();
   }
