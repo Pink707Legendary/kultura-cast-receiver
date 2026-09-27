@@ -18,9 +18,14 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.2.0";
+  var RECEIVER_VERSION = "2.3.0";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
+  /**
+   * Stop by itself after this long without any phone message or remote key, so the TV returns to
+   * its own sleep/screensaver rules (the wake lock would otherwise keep an OLED lit all night).
+   */
+  var UNATTENDED_STOP_MS = 3 * 60 * 60 * 1000;
   var IMAGE_LOAD_TIMEOUT_MS = 15000;
 
   var Motion = window.KulturaMotion;
@@ -252,6 +257,9 @@
     slidePhase = "playing";
 
     // Some catalogue titles end with a stray full stop ("... Water Pitcher."); labels don't.
+    // Alternate corners and nudge the position a little every slide (OLED burn-in).
+    caption.classList.toggle("label-right", currentIndex % 2 === 1);
+    caption.style.marginBottom = ((currentIndex * 7) % 5) * 0.3 + "vh";
     caption.querySelector(".metadata-title").textContent = artwork.title.replace(/([^.])\.$/, "$1");
     var byline = artwork.artist || sourceName;
     caption.querySelector(".metadata-artist").textContent = artwork.date ? byline + ", " + artwork.date : byline;
@@ -313,9 +321,12 @@
     sendStatus();
   }
 
+  var lastActivity = Date.now();
+
   function handleMessage(data) {
     var command = Protocol.parseMessage(data);
     if (!command) return;
+    lastActivity = Date.now();
 
     switch (command.type) {
       case "LOAD_MANIFEST":
@@ -370,12 +381,20 @@
 
   document.addEventListener("keydown", function (event) {
     lastKey = event.key + "/" + event.keyCode;
+    lastActivity = Date.now();
     var action = REMOTE_KEYS[event.key];
     if (!action || artworks.length === 0) return;
     event.preventDefault();
     if (action === "TOGGLE_PAUSE") action = isPaused ? "RESUME" : "PAUSE";
     handleMessage({ type: action });
   });
+
+  setInterval(function () {
+    if (artworks.length === 0 || Date.now() - lastActivity < UNATTENDED_STOP_MS) return;
+    console.log("[KULTURA] no activity for a long time: stopping so the TV can sleep");
+    if (wakeLock) wakeLock.release();
+    if (castContext) castContext.stop();
+  }, 60 * 1000);
 
   // ─── Cast SDK ───
 

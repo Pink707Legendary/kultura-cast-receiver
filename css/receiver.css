@@ -66,6 +66,12 @@ html, body {
   z-index: 2;
 }
 
+.metadata-overlay.label-right {
+  left: auto;
+  right: 5vw;
+  text-align: right;
+}
+
 .metadata-title {
   font-size: 2.4vh;
   font-weight: 600;

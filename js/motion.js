@@ -123,12 +123,19 @@
     ];
   }
 
-  /** Museum label (title, artist, year): fades in just after the painting appears, out before the next. */
+  /**
+   * Museum label (title, artist, year): shown after the painting appears and again during the
+   * final reveal, hidden during the detail zoom. Keeps static on-screen time low (OLED burn-in).
+   */
   var CAPTION_KEYFRAMES = [
     { offset: 0, opacity: 0 },
     { offset: 0.05, opacity: 0 },
-    { offset: 0.1, opacity: 1 },
-    { offset: 0.95, opacity: 1 },
+    { offset: 0.09, opacity: 1 },
+    { offset: 0.28, opacity: 1 },
+    { offset: 0.33, opacity: 0 },
+    { offset: 0.84, opacity: 0 },
+    { offset: 0.88, opacity: 1 },
+    { offset: 0.96, opacity: 1 },
     { offset: 1, opacity: 0 },
   ];
 
