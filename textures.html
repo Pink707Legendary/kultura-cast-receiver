@@ -28,6 +28,13 @@
   .original { flex: 0 0 260px; }
   .original img { width: 260px; height: 260px; object-fit: cover; border-radius: 4px; display: block; }
   .original p { color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.4; }
+  .tv, .original img { cursor: zoom-in; }
+  #viewer { position: fixed; inset: 0; z-index: 50; background: #000; display: none; overflow: auto; cursor: zoom-out; }
+  #viewer.open { display: block; }
+  #viewer .tv { position: absolute; inset: 0; max-width: none; aspect-ratio: auto; border-radius: 0; box-shadow: none; cursor: zoom-out; }
+  #viewer .native { display: block; margin: 0 auto; }
+  #viewer .hint { position: fixed; top: 12px; right: 16px; z-index: 51; color: #ddd; font-size: 12px; background: rgba(0,0,0,.55);
+                  padding: 6px 10px; border-radius: 12px; pointer-events: none; }
   @media (max-width: 900px) { .row { flex-direction: column; } .original { flex-basis: auto; } }
 </style>
 </head>
@@ -36,13 +43,16 @@
   <p class="lede">Each texture is shown large, at <b>1:1</b>: one texture pixel per screen pixel on a Retina laptop, the
   same scale as on the TV. The tint is a muted version of the painting's own colour. "Auto" picks a dark fabric for
   dark paintings and a light mat for light ones. On the right: the original image Astra generated, before it was made
-  neutral and seamless.</p>
+  neutral and seamless. <b>Click any card or original to see it full screen.</b> "Texture size" enlarges the grain:
+  1× is what the TV uses now; 2–3× makes the material recognisable from across a room.</p>
   <div class="sticky">
     <div class="controls" id="paintings"><span>Painting</span></div>
     <div class="controls" id="moods"><span>Mood</span></div>
     <div class="controls" id="art"><span>Show</span></div>
+    <div class="controls" id="scales"><span>Texture size</span></div>
   </div>
   <div id="list"></div>
+  <div id="viewer" title="Click or press Escape to close"><div class="hint">Click or Esc to close</div></div>
 
   <script src="js/backdrop.js"></script>
   <script>
@@ -93,7 +103,39 @@
       "t5-plaster": "Venetian lime plaster",
       "t6-silk": "raw silk (dupioni)",
     };
-    var state = { painting: 0, mood: "auto", showArt: true };
+    var state = { painting: 0, mood: "auto", showArt: true, scale: 1 };
+    /** 512 CSS px = the 1024 px tile at 1:1 on a Retina (2x) screen, like the TV. */
+    function tileSize() { return 512 * state.scale + "px auto"; }
+
+    var viewer = document.getElementById("viewer");
+    function closeViewer() { viewer.classList.remove("open"); viewer.querySelectorAll(".tv, .native").forEach(function (n) { n.remove(); }); }
+    viewer.onclick = closeViewer;
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeViewer(); });
+
+    /** Full-window "TV": same backdrop and painting as the card, filling the laptop screen. */
+    function openTv(slug, backdrop, art) {
+      closeViewer();
+      var tv = document.createElement("div");
+      tv.className = "tv" + (state.showArt ? "" : " no-art");
+      tv.style.backgroundColor = backdrop.tint;
+      tv.style.backgroundImage = "url(textures/" + slug + ".webp)";
+      tv.style.backgroundSize = tileSize();
+      tv.innerHTML = '<img alt="">';
+      tv.querySelector("img").src = art.imageUrl;
+      viewer.appendChild(tv);
+      viewer.classList.add("open");
+    }
+
+    /** Astra's original at native resolution: one image pixel per screen pixel. */
+    function openOriginal(slug) {
+      closeViewer();
+      var img = document.createElement("img");
+      img.className = "native";
+      img.onload = function () { img.style.width = img.naturalWidth / (window.devicePixelRatio || 1) + "px"; };
+      img.src = "textures/originals-full/" + slug + ".jpg";
+      viewer.appendChild(img);
+      viewer.classList.add("open");
+    }
 
     function chip(parent, label, isOn, onClick) {
       var b = document.createElement("button");
@@ -118,6 +160,10 @@
       });
       clearChips("art");
       chip(document.getElementById("art"), state.showArt ? "Painting shown" : "Texture only", state.showArt, function () { state.showArt = !state.showArt; render(); });
+      clearChips("scales");
+      [1, 2, 3].forEach(function (scale) {
+        chip(document.getElementById("scales"), scale + "×" + (scale === 1 ? " (TV now)" : ""), scale === state.scale, function () { state.scale = scale; render(); });
+      });
 
       var art = PAINTINGS[state.painting];
       var list = document.getElementById("list");
@@ -128,10 +174,13 @@
         section.innerHTML =
           "<h2>" + NAMES[slug] + "<small>" + DESCRIPTIONS[slug] + " · " + b.mood + " · tint " + b.tint + "</small></h2>" +
           '<div class="row"><div class="tv' + (state.showArt ? "" : " no-art") + '"><img alt=""></div>' +
-          '<div class="original"><img alt="" src="textures/originals/' + slug + '.jpg"><p>Original from Astra, before it was made neutral and seamless.</p></div></div>';
+          '<div class="original"><img alt="" src="textures/originals/' + slug + '.jpg"><p>Original from Astra (click for full resolution), before it was made neutral and seamless.</p></div></div>';
         var tv = section.querySelector(".tv");
         tv.style.backgroundColor = b.tint;
         tv.style.backgroundImage = "url(textures/" + slug + ".webp)";
+        tv.style.backgroundSize = tileSize();
+        tv.onclick = function () { openTv(slug, b, art); };
+        section.querySelector(".original img").onclick = function () { openOriginal(slug); };
         section.querySelector(".tv img").src = art.imageUrl;
         list.appendChild(section);
       });
