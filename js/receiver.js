@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.1.0";
+  var RECEIVER_VERSION = "2.1.1";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   var IMAGE_LOAD_TIMEOUT_MS = 15000;
@@ -96,6 +96,7 @@
       timelineMs: document.timeline ? Math.round(document.timeline.currentTime || 0) : null,
       lastError: lastError,
       wakeLock: wakeLockStatus,
+      lastKey: typeof lastKey === "undefined" ? null : lastKey,
       viewport: window.innerWidth + "x" + window.innerHeight + "@" + window.devicePixelRatio,
       screen: window.screen.width + "x" + window.screen.height,
       userAgent: navigator.userAgent.slice(0, 160),
@@ -329,6 +330,32 @@
         break;
     }
   }
+
+  // ─── TV remote ───
+  // Left/right skip, OK/play-pause toggles pause. Whether Google TV hands these keys to a cast
+  // page varies by device, so the last key seen is reported in diagnostics.
+  var lastKey = null;
+  var REMOTE_KEYS = {
+    ArrowRight: "NEXT",
+    MediaTrackNext: "NEXT",
+    MediaFastForward: "NEXT",
+    ArrowLeft: "PREVIOUS",
+    MediaTrackPrevious: "PREVIOUS",
+    MediaRewind: "PREVIOUS",
+    Enter: "TOGGLE_PAUSE",
+    MediaPlayPause: "TOGGLE_PAUSE",
+    MediaPlay: "RESUME",
+    MediaPause: "PAUSE",
+  };
+
+  document.addEventListener("keydown", function (event) {
+    lastKey = event.key + "/" + event.keyCode;
+    var action = REMOTE_KEYS[event.key];
+    if (!action || artworks.length === 0) return;
+    event.preventDefault();
+    if (action === "TOGGLE_PAUSE") action = isPaused ? "RESUME" : "PAUSE";
+    handleMessage({ type: action });
+  });
 
   // ─── Cast SDK ───
 
