@@ -14,41 +14,68 @@ html, body {
   color: #fff;
 }
 
-/* ─── Background fill ─── */
+/* ─── Background ─── */
+/* Plain black under everything (first load, between lists). Each artwork layer has its own backdrop. */
 #background {
   position: absolute;
   inset: 0;
   z-index: 0;
   background: #000;
-  /* Tinted texture (receiver.js applyBackdrop): the tint multiplies the neutral grain. 512 CSS px
-     = 1024 real px on the TV's 2x display, i.e. one texture pixel per screen pixel. */
-  background-size: 512px auto;
-  background-repeat: repeat;
-  background-blend-mode: multiply;
-  transition: background-color 2s ease-in-out;
 }
 
-/* ─── Artwork layers (cross-dissolve) ─── */
+/* ─── Artwork layers (dip through the wall) ─── */
+/* A layer is one complete scene: wall + painting + label. Opacity is animated by receiver.js
+   (runTransition): the old painting fades out (1.2 s), the new wall fades in over the old one (0.5 s),
+   the new painting fades in (1.5 s). Two paintings are never on screen together. */
 .artwork-layer {
   position: absolute;
   inset: 0;
   z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   opacity: 0;
-  transition: opacity 2s ease-in-out;
+  /* A zoomed painting must not overflow the page: that enlarged the layout viewport on the TV. */
+  overflow: hidden;
 }
 
 .artwork-layer.active {
   opacity: 1;
+  z-index: 2;
+}
+
+/* The wall: flat dark tint from the painting (backdrop.js), optional texture multiplied in, and a soft
+   radial vignette. 512 CSS px = 1024 real px on the TV's 2x display. */
+.layer-backdrop {
+  position: absolute;
+  inset: 0;
+  background-color: #000;
+  background-size: 512px auto;
+  background-repeat: repeat;
+  background-blend-mode: multiply;
+}
+
+.layer-backdrop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0) 55%, rgba(0, 0, 0, 0.35) 100%);
+}
+
+/* Painting + label of the scene (faded as one by receiver.js). */
+.layer-art {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .artwork-image {
-  /* Width/height are set by receiver.js to fit the screen (upscaling small images).
+  position: relative;
+  /* Width/height are set by receiver.js to the whole painting fitted inside the screen (contain).
      The camera motion is a Web Animation from receiver.js/motion.js, not a CSS transition. */
   display: block;
   will-change: transform;
+  /* Soft shadow under the painting's edge: separates it from the dark wall. */
+  box-shadow: 0 0.8vh 2.6vh rgba(0, 0, 0, 0.5);
 }
 
 /* ─── Metadata overlay ─── */
@@ -66,7 +93,7 @@ html, body {
   backdrop-filter: blur(14px) saturate(115%);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 0.4vh 2.4vh rgba(0, 0, 0, 0.25);
-  /* Opacity is animated by receiver.js (fades in near the end of each slide). */
+  /* Opacity is animated by receiver.js (shown for the first ~8 s of each artwork, then fades). */
   opacity: 0;
   z-index: 2;
 }

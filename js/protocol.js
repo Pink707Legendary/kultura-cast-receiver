@@ -18,6 +18,10 @@
   /** Longest source name kept (the phone compares against the same cut; api/cast.ts). */
   var SOURCE_NAME_MAX_LENGTH = 120;
 
+  /** Gallery choreography (motion.js): "gentle" focus is the default; "still" never moves. */
+  var MOTION_MODES = ["gentle", "still"];
+  var DEFAULT_MOTION = "gentle";
+
   var MIN_SECONDS = 10;
   var MAX_SECONDS = 600;
   var DEFAULT_SECONDS = 45;
@@ -134,12 +138,21 @@
       case "SET_SETTINGS": {
         var seconds = readSeconds(data.secondsPerArtwork);
         var backdrop = readBackdrop(data.backdrop);
-        if (!seconds && !backdrop) return null;
+        var motion = MOTION_MODES.indexOf(data.motion) >= 0 ? data.motion : null;
+        if (!seconds && !backdrop && !motion) return null;
         var settings = { type: "SET_SETTINGS" };
         if (seconds) settings.secondsPerArtwork = seconds;
         if (backdrop) settings.backdrop = backdrop;
+        if (motion) settings.motion = motion;
         return settings;
       }
+      // Test-only (scripts/tv_capture.py, never sent by the app). The receiver acts on SEEK only in
+      // debug mode: page URL with ?debug, or after DEBUG_MODE {enabled: true} in this session.
+      case "DEBUG_MODE":
+        return typeof data.enabled === "boolean" ? { type: "DEBUG_MODE", enabled: data.enabled } : null;
+      case "SEEK":
+        if (!isFiniteNumber(data.timeMs) || data.timeMs < 0 || data.timeMs > MAX_SECONDS * 1000) return null;
+        return { type: "SEEK", timeMs: data.timeMs, pause: data.pause === true };
       case "NEXT":
       case "PREVIOUS":
       case "PAUSE":
@@ -154,6 +167,7 @@
   var api = {
     PROTOCOL_VERSION: PROTOCOL_VERSION,
     SOURCE_NAME_MAX_LENGTH: SOURCE_NAME_MAX_LENGTH,
+    DEFAULT_MOTION: DEFAULT_MOTION,
     DEFAULT_SECONDS: DEFAULT_SECONDS,
     MIN_SECONDS: MIN_SECONDS,
     MAX_SECONDS: MAX_SECONDS,

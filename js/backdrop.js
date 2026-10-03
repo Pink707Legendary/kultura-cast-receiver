@@ -10,16 +10,25 @@
 (function (root) {
   "use strict";
 
-  /** Available texture slugs, in the order shown on the comparison page. */
+  /** Available texture slugs, in the order shown on the comparison page (still selectable). */
   var TEXTURES = ["t1-linen", "t2-matboard", "t3-canvas", "t4-felt", "t5-plaster", "t6-silk"];
-  var DEFAULT_TEXTURE = "t1-linen";
+  /**
+   * Default backdrop: plain muted tint, no texture, no vignette (2.6.0). At the TV's 1080p page
+   * resolution the textures read as coarse upholstery and compete with the painting (2026-10-03).
+   */
+  var DEFAULT_TEXTURE = "none";
 
-  /** Final lightness of the tint for each mood (0..1); the texture's own grain sits on top. */
-  var MOOD_LIGHTNESS = { light: 0.94, dark: 0.25 };
+  /**
+   * The wall is always dark (2.6.0): lightness 0.10 for dark paintings up to 0.16 for light ones. The
+   * old light mood (lightness 0.94) is gone: a near-white field makes the OLED's automatic brightness
+   * limiter dim the painting itself, and dark walls are how museums hang old masters.
+   */
+  var WALL_LIGHTNESS_MIN = 0.1;
+  var WALL_LIGHTNESS_MAX = 0.16;
+  /** Painting luminance at which the wall reaches its lightest. */
+  var LIGHT_PAINTING_LUMINANCE = 0.5;
   /** Maximum saturation kept from the painting's colour: a whisper of its hue, never a colour field. */
-  var MAX_SATURATION = { light: 0.14, dark: 0.18 };
-  /** Paintings whose dominant colour is darker than this get the dark backdrop in "auto" mood. */
-  var DARK_PAINTING_LUMINANCE = 0.2;
+  var MAX_SATURATION = 0.18;
 
   function parseHex(hex) {
     var h = String(hex || "").replace("#", "");
@@ -77,22 +86,27 @@
     return "#" + hex(r) + hex(g) + hex(b);
   }
 
-  /** "light" mat for light paintings, "dark" fabric for dark ones (most old masters). */
-  function chooseMood(mainColor) {
-    return luminance(parseHex(mainColor)) < DARK_PAINTING_LUMINANCE ? "dark" : "light";
+  /** Lightness of the wall for a painting: 0.10 (dark painting) to 0.16 (light painting). */
+  function wallLightness(mainColor) {
+    var t = Math.min(1, luminance(parseHex(mainColor)) / LIGHT_PAINTING_LUMINANCE);
+    return WALL_LIGHTNESS_MIN + (WALL_LIGHTNESS_MAX - WALL_LIGHTNESS_MIN) * t;
   }
 
-  /** Tint for the backdrop: the painting's hue, heavily muted, at the mood's lightness. */
-  function backdropTint(mainColor, mood) {
+  /** Tint for the wall: the painting's hue, heavily muted, dark. */
+  function backdropTint(mainColor) {
     var hsl = rgbToHsl(parseHex(mainColor));
-    return hslToHex({ h: hsl.h, s: Math.min(hsl.s, MAX_SATURATION[mood]), l: MOOD_LIGHTNESS[mood] });
+    return hslToHex({ h: hsl.h, s: Math.min(hsl.s, MAX_SATURATION), l: wallLightness(mainColor) });
   }
 
-  /** Everything the TV needs to paint the backdrop for one artwork. */
-  function backdropFor(mainColor, texture, moodSetting) {
-    var mood = moodSetting === "light" || moodSetting === "dark" ? moodSetting : chooseMood(mainColor);
-    var slug = texture === "none" ? null : TEXTURES.indexOf(texture) >= 0 ? texture : DEFAULT_TEXTURE;
-    return { texture: slug, mood: mood, tint: backdropTint(mainColor, mood) };
+  /**
+   * Everything the TV needs to paint the wall for one artwork. The mood setting is still accepted
+   * (protocol 2) but the wall is always dark now, so it no longer changes anything.
+   */
+  function backdropFor(mainColor, texture) {
+    var mood = "dark";
+    // A known texture slug when chosen; anything else (incl. "none" and unknown slugs) is the plain tint.
+    var slug = TEXTURES.indexOf(texture) >= 0 ? texture : null;
+    return { texture: slug, mood: mood, tint: backdropTint(mainColor) };
   }
 
   var api = {
@@ -100,7 +114,7 @@
     DEFAULT_TEXTURE: DEFAULT_TEXTURE,
     luminance: luminance,
     parseHex: parseHex,
-    chooseMood: chooseMood,
+    wallLightness: wallLightness,
     backdropTint: backdropTint,
     backdropFor: backdropFor,
   };

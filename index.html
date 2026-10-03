@@ -8,23 +8,30 @@
 </head>
 <!-- data-telemetry: js/telemetry.js loads Sentry (async, after startup, no personal data) -->
 <body data-telemetry="sentry">
-  <!-- Background fill — shows mainColor for portrait artworks on landscape TV -->
+  <!-- Black under everything; each artwork layer below carries its own backdrop (tint/texture) -->
   <div id="background"></div>
 
-  <!-- Two layers for cross-dissolve transitions -->
+  <!-- Two layers, each a complete scene: wall (backdrop) + painting + label. Between artworks the
+       painting fades out, the wall changes, the next painting fades in (receiver.js runTransition). -->
   <div id="layer-a" class="artwork-layer">
-    <img class="artwork-image" alt="">
-    <div class="metadata-overlay">
-      <div class="metadata-title"></div>
-      <div class="metadata-artist"></div>
+    <div class="layer-backdrop"></div>
+    <div class="layer-art">
+      <img class="artwork-image" alt="">
+      <div class="metadata-overlay">
+        <div class="metadata-title"></div>
+        <div class="metadata-artist"></div>
+      </div>
     </div>
   </div>
 
   <div id="layer-b" class="artwork-layer">
-    <img class="artwork-image" alt="">
-    <div class="metadata-overlay">
-      <div class="metadata-title"></div>
-      <div class="metadata-artist"></div>
+    <div class="layer-backdrop"></div>
+    <div class="layer-art">
+      <img class="artwork-image" alt="">
+      <div class="metadata-overlay">
+        <div class="metadata-title"></div>
+        <div class="metadata-artist"></div>
+      </div>
     </div>
   </div>
 
