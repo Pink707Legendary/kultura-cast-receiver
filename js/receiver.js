@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.4.0";
+  var RECEIVER_VERSION = "2.5.0";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**
@@ -27,20 +27,36 @@
    */
   var UNATTENDED_STOP_MS = 3 * 60 * 60 * 1000;
   var IMAGE_LOAD_TIMEOUT_MS = 15000;
+  /** Longest wait for img.decode() after the image has loaded. */
+  var DECODE_WAIT_MAX_MS = 3000;
+  /** How often the watchdog checks that the slideshow is still moving. */
+  var WATCHDOG_INTERVAL_MS = 10000;
+  /**
+   * Longest a single artwork can legitimately spend loading: large image timeout, then fallback image
+   * timeout, then the decode cap. The load path owns these timeouts; the watchdog only steps in after
+   * this (plus a grace period), so it never cuts a fallback short.
+   */
+  var LOAD_DEADLINE_MS = window.KulturaPlaylist.worstCaseLoadMs(IMAGE_LOAD_TIMEOUT_MS, DECODE_WAIT_MAX_MS);
 
   var Motion = window.KulturaMotion;
   var Protocol = window.KulturaProtocol;
   var Backdrop = window.KulturaBackdrop;
+  var Playlist = window.KulturaPlaylist;
+  var Telemetry = window.KulturaTelemetry;
 
   // ─── DOM refs ───
   var bgEl = document.getElementById("background");
   var layers = { a: document.getElementById("layer-a"), b: document.getElementById("layer-b") };
   var idleScreen = document.getElementById("idle-screen");
   var idleSubtitle = idleScreen.querySelector(".idle-subtitle");
+  var idleSource = idleScreen.querySelector(".idle-source");
 
   // ─── State ───
-  var artworks = [];
-  var sourceName = "";
+  /** The list being played; replaced by every LOAD_MANIFEST (see playlist.js for the takeover rule). */
+  var playlist = Playlist.createPlaylist();
+  /** Shortcuts into `playlist`, refreshed whenever it changes. */
+  var artworks = playlist.artworks;
+  var sourceName = playlist.sourceName;
   var currentIndex = 0;
   var isPaused = false;
   var secondsPerArtwork = Protocol.DEFAULT_SECONDS;
@@ -55,7 +71,15 @@
   var castContext = null;
   /** For diagnostics in STATUS: "idle" | "loading" | "playing" | "failed". */
   var slidePhase = "idle";
+  var phaseStartedAt = Date.now();
+  /** True from a LOAD_MANIFEST until its first picture is on screen ("Preparing your gallery"). */
+  var isPreparing = false;
   var lastError = null;
+
+  function setPhase(phase) {
+    slidePhase = phase;
+    phaseStartedAt = Date.now();
+  }
 
   window.addEventListener("error", function (event) {
     lastError = String(event.message || event.error || "error").slice(0, 200);
@@ -115,6 +139,11 @@
     var anim = slideAnimations && slideAnimations.image;
     return {
       phase: slidePhase,
+      phaseMs: Date.now() - phaseStartedAt,
+      preparing: isPreparing,
+      currentArtworkId: artworks[currentIndex] ? artworks[currentIndex].id : null,
+      totalArtworks: artworks.length,
+      consecutiveLoadFailures: consecutiveLoadFailures,
       visibility: document.visibilityState,
       animationState: anim ? anim.playState : null,
       animationTimeMs: anim && anim.currentTime != null ? Math.round(anim.currentTime) : null,
@@ -153,6 +182,8 @@
       currentArtwork: artwork ? { id: artwork.id, title: artwork.title } : null,
       secondsPerArtwork: secondsPerArtwork,
       sourceName: sourceName,
+      // Echo of the phone's LOAD_MANIFEST id (null for a list sent without one, e.g. an older phone).
+      manifestId: playlist.manifestId,
       backdrop: { texture: backdropTexture, mood: backdropMood },
       debug: diagnostics(),
     };
@@ -173,13 +204,35 @@
       }, IMAGE_LOAD_TIMEOUT_MS);
       img.onload = function () {
         clearTimeout(timer);
-        resolve();
+        // Decode before showing, so a large (3200 px) picture does not stutter the cross-fade.
+        // Capped: browsers may hold decode() while the page is hidden (Ambient mode), and a
+        // pending decode must never hold the slideshow.
+        if (typeof img.decode === "function") {
+          var decodeCap = setTimeout(resolve, DECODE_WAIT_MAX_MS);
+          var decoded = function () {
+            clearTimeout(decodeCap);
+            resolve();
+          };
+          img.decode().then(decoded, decoded);
+        } else {
+          resolve();
+        }
       };
       img.onerror = function () {
         clearTimeout(timer);
         reject(new Error("image load error"));
       };
       img.src = url;
+    });
+  }
+
+  /** Load the artwork's image; if it fails and a fallback (normal-size) image exists, try that. */
+  function loadArtworkImage(img, artwork, token) {
+    return loadImage(img, artwork.imageUrl).catch(function (err) {
+      if (!artwork.fallbackImageUrl || token !== slideToken) throw err;
+      console.warn("[KULTURA] artwork " + artwork.id + ": large image failed (" + err.message + "), using the normal one");
+      Telemetry.reportImageFallback(artwork.id, err.message);
+      return loadImage(img, artwork.fallbackImageUrl);
     });
   }
 
@@ -214,9 +267,16 @@
     }
   }
 
-  function showIdle(message) {
+  function showIdle(message, source) {
     idleSubtitle.textContent = message;
+    idleSource.textContent = source || "";
     idleScreen.classList.remove("hidden");
+  }
+
+  /** Calm screen from a new list until its first picture is decoded (also covers a takeover). */
+  function showPreparing() {
+    isPreparing = true;
+    showIdle("Preparing your gallery", sourceName);
   }
 
   function showArtwork(index) {
@@ -231,10 +291,10 @@
     var caption = incoming.querySelector(".metadata-overlay");
 
     cancelLayerAnimations(incoming);
-    slidePhase = "loading";
+    setPhase("loading");
     sendStatus();
 
-    loadImage(img, artwork.imageUrl).then(
+    loadArtworkImage(img, artwork, token).then(
       function () {
         if (token !== slideToken) return; // the user skipped while this was loading
         consecutiveLoadFailures = 0;
@@ -242,23 +302,38 @@
       },
       function (err) {
         if (token !== slideToken) return;
-        console.warn("[KULTURA] skipping artwork " + artwork.id + ": " + err.message);
-        consecutiveLoadFailures++;
-        lastError = "image " + artwork.id + ": " + err.message;
-        if (consecutiveLoadFailures >= artworks.length) {
-          slidePhase = "failed";
-          showIdle("Couldn't load the artworks. Check the TV's internet connection.");
-          return;
-        }
-        showArtwork(currentIndex + 1);
+        artworkFailed(artwork, err.message);
       }
     );
+  }
+
+  /**
+   * An artwork could not be shown (load error, timeout, or the watchdog gave up on it): count it,
+   * report it, and move on, or show the failure screen once every artwork in the list has failed.
+   * Bumps the slide token so a load still pending for this artwork is ignored when it ends.
+   */
+  function artworkFailed(artwork, reason) {
+    slideToken++;
+    console.warn("[KULTURA] skipping artwork " + artwork.id + ": " + reason);
+    consecutiveLoadFailures++;
+    lastError = "image " + artwork.id + ": " + reason;
+    Telemetry.reportImageFailure(artwork.id, reason);
+    if (consecutiveLoadFailures >= artworks.length) {
+      setPhase("failed");
+      isPreparing = false;
+      showIdle("Couldn't load the artworks. Check the TV's internet connection.");
+      Telemetry.reportMessage("Cast receiver: no artwork could be loaded", "error", { category: "image", totalArtworks: artworks.length }, "all-images:" + playlist.generation);
+      sendStatus();
+      return;
+    }
+    showArtwork(currentIndex + 1);
   }
 
   function startSlide(artwork, incoming, incomingId, img, caption, token) {
     var outgoing = layers[activeLayerId];
     var geometry = fitImage(img);
-    slidePhase = "playing";
+    setPhase("playing");
+    isPreparing = false;
 
     // Some catalogue titles end with a stray full stop ("... Water Pitcher."); labels don't.
     // Alternate corners and nudge the position a little every slide (OLED burn-in).
@@ -334,24 +409,38 @@
 
   var lastActivity = Date.now();
 
-  function handleMessage(data) {
+  /**
+   * One message from a phone (or the TV remote). `senderId` is the Cast sender that sent it; it only
+   * matters for APPEND_ARTWORKS (see playlist.js). A LOAD_MANIFEST from any sender always replaces
+   * what is playing.
+   */
+  function handleMessage(data, senderId) {
     var command = Protocol.parseMessage(data);
     if (!command) return;
     lastActivity = Date.now();
 
     switch (command.type) {
       case "LOAD_MANIFEST":
-        artworks = command.artworks;
-        sourceName = command.sourceName;
-        if (command.secondsPerArtwork) secondsPerArtwork = command.secondsPerArtwork;
-        isPaused = false;
-        consecutiveLoadFailures = 0;
-        showArtwork(0);
+      case "APPEND_ARTWORKS": {
+        var result = Playlist.applyManifestCommand(playlist, command, senderId);
+        if (!result) {
+          console.log("[KULTURA] ignoring " + command.type + " from a sender whose list was replaced");
+          return;
+        }
+        playlist = result.playlist;
+        artworks = playlist.artworks;
+        sourceName = playlist.sourceName;
+        if (result.restart) {
+          if (command.secondsPerArtwork) secondsPerArtwork = command.secondsPerArtwork;
+          isPaused = false;
+          consecutiveLoadFailures = 0;
+          showPreparing();
+          showArtwork(0);
+        } else {
+          sendStatus();
+        }
         break;
-      case "APPEND_ARTWORKS":
-        artworks = artworks.concat(command.artworks);
-        sendStatus();
-        break;
+      }
       case "SET_SETTINGS":
         if (command.backdrop) {
           if (command.backdrop.texture) backdropTexture = command.backdrop.texture;
@@ -413,6 +502,39 @@
     if (castContext) castContext.stop();
   }, 60 * 1000);
 
+  // ─── Watchdog ───
+  // The slideshow advances on animation "finish" and image load events. If either never comes (a
+  // decoder hang, a TV that drops an event), report it with the diagnostics and move on.
+  var previousAnimationTimeMs = null;
+  setInterval(function () {
+    if (artworks.length === 0) return;
+    var anim = slideAnimations && slideAnimations.image;
+    var animationTimeMs = anim && anim.currentTime != null ? Math.round(anim.currentTime) : null;
+    var stall = Playlist.detectEngineStall({
+      phase: slidePhase,
+      phaseStartedAt: phaseStartedAt,
+      now: Date.now(),
+      isPaused: isPaused,
+      visibility: document.visibilityState,
+      animationTimeMs: animationTimeMs,
+      previousAnimationTimeMs: previousAnimationTimeMs,
+      loadDeadlineMs: LOAD_DEADLINE_MS,
+    });
+    previousAnimationTimeMs = animationTimeMs;
+    if (!stall) return;
+    var stalledArtwork = artworks[currentIndex] || null;
+    console.warn("[KULTURA] engine stalled (" + stall + "): skipping ahead");
+    Telemetry.reportStall(stall, { artworkId: stalledArtwork ? stalledArtwork.id : null });
+    previousAnimationTimeMs = null;
+    if (stall === "loading-timeout" && stalledArtwork) {
+      // Counts as a failed artwork, so a list where nothing loads reaches the failure screen.
+      artworkFailed(stalledArtwork, "watchdog: " + stall);
+    } else {
+      lastError = "stall: " + stall;
+      showArtwork(currentIndex + 1);
+    }
+  }, WATCHDOG_INTERVAL_MS);
+
   // ─── Cast SDK ───
 
   function initCast() {
@@ -422,7 +544,7 @@
     }
     castContext = cast.framework.CastReceiverContext.getInstance();
     castContext.addCustomMessageListener(NAMESPACE, function (event) {
-      handleMessage(event.data);
+      handleMessage(event.data, event.senderId);
     });
     castContext.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function () {
       sendStatus();
@@ -433,6 +555,8 @@
     castContext.start(options);
     console.log("[KULTURA] Cast receiver " + RECEIVER_VERSION + " started");
   }
+
+  showIdle("Preparing your gallery", "");
 
   // ─── Dev mode hooks (dev.html drives the engine without a TV) ───
   window.kulturaReceiver = {
@@ -445,10 +569,15 @@
         isPaused: isPaused,
         secondsPerArtwork: secondsPerArtwork,
         sourceName: sourceName,
+        phase: slidePhase,
+        preparing: isPreparing,
+        idleText: idleScreen.classList.contains("hidden") ? null : idleSubtitle.textContent + " | " + idleSource.textContent,
         progress: slideAnimations ? slideAnimations.image.currentTime / slideDurationMs() : null,
       };
     },
   };
 
   initCast();
+  // After the Cast receiver has started: error reporting must never delay casting (telemetry.js).
+  Telemetry.init({ version: RECEIVER_VERSION, getDiagnostics: diagnostics });
 })();

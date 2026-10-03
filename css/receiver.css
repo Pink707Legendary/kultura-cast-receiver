@@ -120,5 +120,20 @@ html, body {
 .idle-subtitle {
   font-size: 2.4vh;
   font-weight: 300;
-  opacity: 0.5;
+  opacity: 0.6;
+  animation: idle-breathe 4s ease-in-out infinite;
+}
+
+/* Name of what is about to play ("My collection", an artist, a board) */
+.idle-source {
+  margin-top: 1.4vh;
+  font-size: 3vh;
+  font-weight: 400;
+  opacity: 0.85;
+  min-height: 3.6vh;
+}
+
+@keyframes idle-breathe {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.7; }
 }

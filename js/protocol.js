@@ -15,6 +15,9 @@
   /** Image hosts the TV will load from. Anything else is ignored. */
   var ALLOWED_IMAGE_PREFIXES = ["https://d3bptqubukeepm.cloudfront.net/"];
 
+  /** Longest source name kept (the phone compares against the same cut; api/cast.ts). */
+  var SOURCE_NAME_MAX_LENGTH = 120;
+
   var MIN_SECONDS = 10;
   var MAX_SECONDS = 600;
   var DEFAULT_SECONDS = 45;
@@ -53,7 +56,7 @@
     var colour = typeof raw.mainColor === "string" && /^#[0-9a-fA-F]{3,8}$/.test(raw.mainColor) ? raw.mainColor : "#000000";
     // The API sends Android-style #AARRGGBB; CSS would read that as #RRGGBBAA. Keep the RGB part.
     if (colour.length === 9) colour = "#" + colour.slice(3);
-    return {
+    var artwork = {
       id: raw.id,
       title: shortText(raw.title, 200),
       artist: shortText(raw.artist, 120),
@@ -62,6 +65,11 @@
       mainColor: colour,
       focus: readFocus(raw.focus),
     };
+    // Optional second image (the normal size) tried when imageUrl (the zoom tier) fails to load.
+    if (isAllowedImageUrl(raw.fallbackImageUrl) && raw.fallbackImageUrl !== raw.imageUrl) {
+      artwork.fallbackImageUrl = raw.fallbackImageUrl;
+    }
+    return artwork;
   }
 
   function readArtworkList(list) {
@@ -72,6 +80,11 @@
       if (artwork) clean.push(artwork);
     }
     return clean;
+  }
+
+  /** Optional id the phone puts on each LOAD_MANIFEST; echoed in STATUS so the phone knows its list arrived. */
+  function readManifestId(value) {
+    return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : null;
   }
 
   function readSeconds(value) {
@@ -108,7 +121,8 @@
         if (artworks.length === 0) return null;
         return {
           type: "LOAD_MANIFEST",
-          sourceName: shortText(data.sourceName, 120),
+          sourceName: shortText(data.sourceName, SOURCE_NAME_MAX_LENGTH),
+          manifestId: readManifestId(data.manifestId),
           artworks: artworks,
           secondsPerArtwork: readSeconds(data.secondsPerArtwork),
         };
@@ -139,6 +153,7 @@
 
   var api = {
     PROTOCOL_VERSION: PROTOCOL_VERSION,
+    SOURCE_NAME_MAX_LENGTH: SOURCE_NAME_MAX_LENGTH,
     DEFAULT_SECONDS: DEFAULT_SECONDS,
     MIN_SECONDS: MIN_SECONDS,
     MAX_SECONDS: MAX_SECONDS,

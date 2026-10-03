@@ -6,7 +6,8 @@
   <title>KULTURA — Ambient Gallery</title>
   <link rel="stylesheet" href="css/receiver.css">
 </head>
-<body>
+<!-- data-telemetry: js/telemetry.js loads Sentry (async, after startup, no personal data) -->
+<body data-telemetry="sentry">
   <!-- Background fill — shows mainColor for portrait artworks on landscape TV -->
   <div id="background"></div>
 
@@ -30,7 +31,8 @@
   <!-- Idle screen before manifest arrives -->
   <div id="idle-screen">
     <div class="idle-title">KULTURA</div>
-    <div class="idle-subtitle">Waiting for artworks&hellip;</div>
+    <div class="idle-subtitle">Preparing your gallery</div>
+    <div class="idle-source"></div>
   </div>
 
   <!-- Google Cast Web Receiver SDK -->
@@ -38,6 +40,8 @@
   <script src="js/motion.js"></script>
   <script src="js/protocol.js"></script>
   <script src="js/backdrop.js"></script>
+  <script src="js/playlist.js"></script>
+  <script src="js/telemetry.js"></script>
   <script src="js/receiver.js"></script>
 </body>
 </html>
