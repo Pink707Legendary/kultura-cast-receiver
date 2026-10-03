@@ -72,7 +72,9 @@
    *   - "loading-timeout": a load has been pending past its worst-case deadline (worstCaseLoadMs) plus
    *     a grace period, so the watchdog never cuts the fallback image short.
    *   - "animation-frozen": the slide is visible, not paused, but its animation has not advanced
-   *     since the previous check (a finished animation whose onfinish never fired also looks like this).
+   *     since the previous check of the SAME animation during uninterrupted playback (a finished
+   *     animation whose onfinish never fired also looks like this). Pending play/pause operations
+   *     hold currentTime legitimately; their readings must not seed the next comparison.
    * Hidden pages (Google TV Ambient mode) are not stalls: browsers freeze animations there on purpose.
    */
   function detectEngineStall(s) {
@@ -82,6 +84,10 @@
     }
     if (
       s.phase === "playing" &&
+      s.animation != null &&
+      s.animation === s.previousAnimation &&
+      !s.animationPending &&
+      (s.animationState === "running" || s.animationState === "finished") &&
       s.animationTimeMs != null &&
       s.previousAnimationTimeMs != null &&
       s.animationTimeMs === s.previousAnimationTimeMs

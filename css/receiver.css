@@ -73,7 +73,8 @@ html, body {
   /* Width/height are set by receiver.js to the whole painting fitted inside the screen (contain).
      The camera motion is a Web Animation from receiver.js/motion.js, not a CSS transition. */
   display: block;
-  will-change: transform;
+  /* No will-change: a permanent compositing hint keeps Chrome drawing the painting at a cached, softer
+     scale. Only the move itself is animated (receiver.js syncMove, 2.6.1). */
   /* Soft shadow under the painting's edge: separates it from the dark wall. */
   box-shadow: 0 0.8vh 2.6vh rgba(0, 0, 0, 0.5);
 }

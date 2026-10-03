@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.6.0";
+  var RECEIVER_VERSION = "2.6.1";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**
@@ -189,7 +189,7 @@
   function slideDiagnostics() {
     if (!currentSlide) return { image: null, motion: { mode: motionMode } };
     var s = currentSlide;
-    var anim = slideAnimations && slideAnimations.image;
+    var anim = slideAnimations && slideAnimations.clock;
     var timeMs = anim && anim.currentTime != null ? anim.currentTime : 0;
     var pose = currentPose();
     var scale = pose ? Math.round(pose.scale * 10000) / 10000 : null;
@@ -220,7 +220,7 @@
 
   /** Engine state sent with STATUS so a TV can be debugged from a phone or Mac. */
   function diagnostics() {
-    var anim = slideAnimations && slideAnimations.image;
+    var anim = slideAnimations && slideAnimations.clock;
     var slide = slideDiagnostics();
     return {
       phase: slidePhase,
@@ -465,6 +465,7 @@
   }
 
   function startSlide(artwork, loadedImg, token, loaded) {
+    resetAnimationWatchdog();
     var incomingId = chooseIncomingLayerId();
     var incoming = layers[incomingId];
     var outgoing = layers[incomingId === "a" ? "b" : "a"];
@@ -505,16 +506,20 @@
     caption.querySelector(".metadata-artist").textContent = artwork.date ? byline + ", " + artwork.date : byline;
 
     var timing = { duration: slideDurationMs(), fill: "forwards" };
-    var imageAnimation = img.animate(Motion.buildKeyframes(plan), timing);
+    // The slide clock has no visible effect: its time drives the move (syncMove), the label, SEEK, the
+    // watchdog, and the change to the next painting when it finishes.
+    var clockAnimation = img.animate([{ visibility: "visible" }, { visibility: "visible" }], timing);
     var captionAnimation = caption.animate(Motion.captionKeyframes(slideDurationMs()), timing);
     if (isPaused) {
-      imageAnimation.pause();
+      clockAnimation.pause();
       captionAnimation.pause();
     }
-    imageAnimation.onfinish = function () {
+    clockAnimation.onfinish = function () {
       if (token === slideToken) showArtwork(currentIndex + 1);
     };
-    slideAnimations = { image: imageAnimation, caption: captionAnimation };
+    if (slideAnimations) clearTimeout(slideAnimations.moveTimer);
+    slideAnimations = { clock: clockAnimation, caption: captionAnimation, img: img, plan: plan, move: null, moveTimer: null };
+    syncMove();
 
     applyBackdrop(incoming, artwork);
     runTransition(outgoing, incoming, layerOpacityNow);
@@ -523,6 +528,47 @@
     requestWakeLock();
 
     preloadAhead();
+  }
+
+  /**
+   * Keeps the painting in step with the slide clock (2.6.1): a static transform before and after the
+   * move, and a move animation only while the move runs (why: motion.js, restingTransformAt). Called at
+   * slide start, when the move is due (timer), on pause/resume and after a SEEK.
+   */
+  function syncMove() {
+    var a = slideAnimations;
+    if (!a) return;
+    clearTimeout(a.moveTimer);
+    a.moveTimer = null;
+    var t = a.plan.timeline;
+    var timeMs = a.clock.currentTime || 0;
+    if (!t || timeMs < t.wholeEndMs || timeMs >= t.focusStartMs) {
+      a.img.style.transform = Motion.restingTransformAt(a.plan, timeMs);
+      if (a.move) {
+        a.move.cancel();
+        a.move = null;
+      }
+      if (t && timeMs < t.wholeEndMs && !isPaused) a.moveTimer = setTimeout(syncMove, t.wholeEndMs - timeMs);
+      return;
+    }
+    if (!a.move) {
+      var move = a.img.animate(Motion.moveKeyframes(a.plan), { duration: t.focusStartMs - t.wholeEndMs, fill: "forwards" });
+      move.onfinish = function () {
+        if (slideAnimations !== a || a.move !== move) return; // an old slide: it keeps its end pose (fill)
+        // Pin the end pose as a static transform BEFORE dropping the animation: no frame shows neither.
+        a.img.style.transform = Motion.restingTransformAt(a.plan, t.focusStartMs);
+        move.cancel();
+        a.move = null;
+      };
+      a.move = move;
+    }
+    a.move.currentTime = timeMs - t.wholeEndMs;
+    if (isPaused) a.move.pause();
+    else {
+      a.move.play();
+      // Backup for a lost finish event (Fable review 2.6.1): the resting branch pins the end pose too.
+      a.moveTimer = setTimeout(syncMove, t.focusStartMs - timeMs);
+    }
   }
 
   /**
@@ -587,15 +633,17 @@
   // ─── Commands ───
 
   function setPaused(paused) {
+    resetAnimationWatchdog();
     isPaused = paused;
     if (slideAnimations) {
       if (paused) {
-        slideAnimations.image.pause();
+        slideAnimations.clock.pause();
         slideAnimations.caption.pause();
       } else {
-        slideAnimations.image.play();
+        slideAnimations.clock.play();
         slideAnimations.caption.play();
       }
+      syncMove();
     }
     sendStatus();
   }
@@ -678,10 +726,14 @@
       case "SEEK":
         // Test-only (tv_capture.py): jump the slide on screen to an exact animation time.
         if (!debugMode || !slideAnimations) return;
-        slideAnimations.image.currentTime = command.timeMs;
+        resetAnimationWatchdog();
+        slideAnimations.clock.currentTime = command.timeMs;
         slideAnimations.caption.currentTime = command.timeMs;
         if (command.pause !== isPaused) setPaused(command.pause);
-        else sendStatus();
+        else {
+          syncMove();
+          sendStatus();
+        }
         break;
     }
   }
@@ -723,10 +775,16 @@
   // ─── Watchdog ───
   // The slideshow advances on animation "finish" and image load events. If either never comes (a
   // decoder hang, a TV that drops an event), report it with the diagnostics and move on.
+  var previousAnimation = null;
   var previousAnimationTimeMs = null;
+  function resetAnimationWatchdog() {
+    previousAnimation = null;
+    previousAnimationTimeMs = null;
+  }
+  document.addEventListener("visibilitychange", resetAnimationWatchdog);
   setInterval(function () {
     if (artworks.length === 0) return;
-    var anim = slideAnimations && slideAnimations.image;
+    var anim = slideAnimations && slideAnimations.clock;
     var animationTimeMs = anim && anim.currentTime != null ? Math.round(anim.currentTime) : null;
     var stall = Playlist.detectEngineStall({
       phase: slidePhase,
@@ -734,16 +792,28 @@
       now: Date.now(),
       isPaused: isPaused,
       visibility: document.visibilityState,
+      animation: anim,
+      previousAnimation: previousAnimation,
+      animationState: anim ? anim.playState : null,
+      animationPending: anim ? anim.pending : false,
       animationTimeMs: animationTimeMs,
       previousAnimationTimeMs: previousAnimationTimeMs,
       loadDeadlineMs: LOAD_DEADLINE_MS,
     });
-    previousAnimationTimeMs = animationTimeMs;
+    // Paused/pending animations have a hold time, not a running clock. Loading may still point
+    // at the outgoing slide. Neither is a baseline for the next uninterrupted playback interval.
+    if (slidePhase === "playing" && !isPaused && document.visibilityState === "visible" &&
+        anim && !anim.pending && (anim.playState === "running" || anim.playState === "finished")) {
+      previousAnimation = anim;
+      previousAnimationTimeMs = animationTimeMs;
+    } else {
+      resetAnimationWatchdog();
+    }
     if (!stall) return;
     var stalledArtwork = artworks[currentIndex] || null;
     console.warn("[KULTURA] engine stalled (" + stall + "): skipping ahead");
     Telemetry.reportStall(stall, { artworkId: stalledArtwork ? stalledArtwork.id : null });
-    previousAnimationTimeMs = null;
+    resetAnimationWatchdog();
     if (stall === "loading-timeout" && stalledArtwork) {
       // Counts as a failed artwork, so a list where nothing loads reaches the failure screen.
       artworkFailed(stalledArtwork, "watchdog: " + stall);
@@ -790,7 +860,7 @@
         phase: slidePhase,
         preparing: isPreparing,
         idleText: idleScreen.classList.contains("hidden") ? null : idleSubtitle.textContent + " | " + idleSource.textContent,
-        progress: slideAnimations ? slideAnimations.image.currentTime / slideDurationMs() : null,
+        progress: slideAnimations ? slideAnimations.clock.currentTime / slideDurationMs() : null,
       };
     },
   };

@@ -41,11 +41,18 @@
    * An AI crop spanning at least this share of the image's width or height is a STRIP (most of today's
    * crops are phone-portrait strips the full height of the painting): a direction hint, not a subject
    * box. The move then heads for the strip's centre, slightly above the middle, as deep as composition
-   * and sharpness allow (orchestrator decision 2026-10-03).
+   * and sharpness allow (orchestrator decision 2026-10-03), keeping headroom above the strip's top
+   * (STRIP_HEADROOM).
    */
   var STRIP_SPAN = 0.9;
   /** Strips: aim this far down the strip (0.4 = a little above its middle, where faces and skies are). */
   var STRIP_VERTICAL_BIAS = 0.4;
+  /**
+   * Strips that do not span the full height: at the deepest point the strip's top edge lands at least
+   * this share of the screen height below the screen's top edge. Phone-portrait crops of tall paintings
+   * often start at the eyes; the head or sky above them stays in view (2104 Mucha, TV QA 2026-10-03).
+   */
+  var STRIP_HEADROOM = 0.15;
   /** Gentle moves need at least this long a slide; shorter slides stay still. */
   var MIN_GENTLE_SLIDE_MS = 30000;
   /** The whole painting is shown, still, for at least this share of every slide. */
@@ -161,6 +168,22 @@
     return clampPose({ scale: scale, x: -scale * (fx - 0.5) * box.width, y: -scale * (fy - 0.5) * box.height }, box, view);
   }
 
+  /**
+   * Moves a strip pose down (toward the painting's top) until the strip's top edge sits at least
+   * STRIP_HEADROOM of the screen below the top edge, clamped to the painting's edges. Strips that start
+   * at the painting's top are left alone (nothing above to keep; the vertical bias decides). Any strip
+   * that starts lower gets headroom, even one 90-100 % tall (Fable review 2.6.1: phone crops of
+   * paintings with aspect ~0.41-0.46 start just below the top, at the eyes).
+   */
+  function keepStripHeadroom(focus, pose, box, view) {
+    if (!isStrip(focus) || focus.y0 <= 0.01) return pose;
+    // Screen position of the strip's top edge, px from the screen centre (see project in the tests).
+    var stripTop = pose.y + pose.scale * (focus.y0 - 0.5) * box.height;
+    var highest = -view.height / 2 + STRIP_HEADROOM * view.height;
+    if (stripTop >= highest) return pose;
+    return clampPose({ scale: pose.scale, x: pose.x, y: pose.y + (highest - stripTop) }, box, view);
+  }
+
   /** Shortest move to `zoom` that keeps the fastest point under MAX_ZOOM_RATE_PER_S. */
   function minMoveMs(zoom) {
     return Math.ceil((MOVE_EASING_PEAK_SPEED * Math.log(zoom) * 1000) / MAX_ZOOM_RATE_PER_S);
@@ -240,7 +263,7 @@
     result.plan = "gentle";
     result.reason = "ok";
     result.zoom = zoom;
-    result.detailPose = poseAt(cx, cy, zoom, box, o.view);
+    result.detailPose = keepStripHeadroom(o.focus, poseAt(cx, cy, zoom, box, o.view), box, o.view);
     result.timeline = timeline;
     return result;
   }
@@ -249,25 +272,27 @@
     return "translate(" + pose.x.toFixed(1) + "px, " + pose.y.toFixed(1) + "px) scale(" + pose.scale.toFixed(4) + ")";
   }
 
-  /** Web Animation keyframes for a plan: static for "still", one eased move and back for "gentle". */
-  function buildKeyframes(plan) {
-    var rest = poseToTransform(REST);
-    if (plan.plan !== "gentle") {
-      return [
-        { offset: 0, transform: rest },
-        { offset: 1, transform: rest },
-      ];
-    }
-    var t = plan.timeline;
-    var d = t.durationMs;
-    var focus = poseToTransform(plan.detailPose);
-    // One way only: whole, then the move, then the subject until the slide ends (never back).
+  /**
+   * The painting is animated ONLY during the move (2.6.1, TV QA 2026-10-03). A transform animation that
+   * spans the whole slide makes the TV's Chrome treat the painting as moving for the whole slide and
+   * draw it softer than its file allows (Irises, same scale: sharpness 2419 in Gentle vs 5350 in Still).
+   * Before and after the move the painting holds a static transform (restingTransformAt), which Chrome
+   * redraws crisp at the exact scale.
+   */
+
+  /** Keyframes of the one eased move, whole -> subject (null for a still plan). */
+  function moveKeyframes(plan) {
+    if (plan.plan !== "gentle") return null;
     return [
-      { offset: 0, transform: rest },
-      { offset: t.wholeEndMs / d, transform: rest, easing: MOVE_EASING },
-      { offset: t.focusStartMs / d, transform: focus },
-      { offset: 1, transform: focus },
+      { transform: poseToTransform(REST), easing: MOVE_EASING },
+      { transform: poseToTransform(plan.detailPose) },
     ];
+  }
+
+  /** Static transform for the painting at slide time `timeMs` outside the move: whole before it, subject after. */
+  function restingTransformAt(plan, timeMs) {
+    var subject = plan.plan === "gentle" && timeMs >= plan.timeline.focusStartMs;
+    return poseToTransform(subject ? plan.detailPose : REST);
   }
 
   /** Which part of the slide is on screen at `timeMs` ("still" for a still plan). */
@@ -305,6 +330,7 @@
     COMPOSITION_CAP: COMPOSITION_CAP,
     MIN_WORTHWHILE_ZOOM: MIN_WORTHWHILE_ZOOM,
     SUBJECT_SCREEN_SHARE: SUBJECT_SCREEN_SHARE,
+    STRIP_HEADROOM: STRIP_HEADROOM,
     MIN_WHOLE_SHARE: MIN_WHOLE_SHARE,
     MIN_FOCUS_HOLD_MS: MIN_FOCUS_HOLD_MS,
     MOVE_EASING: MOVE_EASING,
@@ -324,9 +350,11 @@
     availableZoom: availableZoom,
     clampPose: clampPose,
     poseAt: poseAt,
+    keepStripHeadroom: keepStripHeadroom,
     gentleTimeline: gentleTimeline,
     planSlide: planSlide,
-    buildKeyframes: buildKeyframes,
+    moveKeyframes: moveKeyframes,
+    restingTransformAt: restingTransformAt,
     slidePhaseAt: slidePhaseAt,
     captionKeyframes: captionKeyframes,
   };
