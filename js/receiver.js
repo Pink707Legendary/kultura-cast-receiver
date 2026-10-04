@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.6.1";
+  var RECEIVER_VERSION = "2.7.0";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**
@@ -168,9 +168,12 @@
     return m ? { scale: Number(m[1]), x: Number(m[2]), y: Number(m[3]) } : { scale: 1, x: 0, y: 0 };
   }
 
-  /** Where the centre of the AI-crop subject is on screen right now, in device px (null: no subject). */
+  /**
+   * Where the centre of the subject is on screen right now, in device px (null: no subject). The subject
+   * is the chosen point(s) of interest when the phone sent them (2.7.0), else the AI crop.
+   */
   function focusOnScreen(slide, pose) {
-    var f = slide.artwork.focus;
+    var f = slide.plan.subject || slide.artwork.focus;
     if (!f || !pose) return null;
     var view = currentView();
     var box = slide.plan.box;
@@ -486,6 +489,7 @@
       motion: motionMode,
       durationMs: slideDurationMs(),
       focus: artwork.focus,
+      poi: artwork.poi,
       natural: natural,
       view: view,
       dpr: dpr,

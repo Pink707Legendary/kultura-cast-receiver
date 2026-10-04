@@ -53,6 +53,18 @@
    * often start at the eyes; the head or sky above them stays in view (2104 Mucha, TV QA 2026-10-03).
    */
   var STRIP_HEADROOM = 0.15;
+  /**
+   * Points of interest (2.7.0, research tasks/2026-10-03-points-of-interest): when the phone sends ranked
+   * subject boxes from a vision model, the TV may go deeper than COMPOSITION_CAP, up to this, but only for
+   * a point the model is at least POI_CONFIDENT_MIN sure of (and still only as deep as stays sharp).
+   */
+  var POI_CONFIDENT_CAP = 2.0;
+  var POI_CONFIDENT_MIN = 0.7;
+  /**
+   * The subject's centre lands this far down the screen (0.5 = middle): a little above the middle, so
+   * faces get headroom and the eye line sits where a curator would hang it.
+   */
+  var POI_SCREEN_Y = 0.45;
   /** Gentle moves need at least this long a slide; shorter slides stay still. */
   var MIN_GENTLE_SLIDE_MS = 30000;
   /** The whole painting is shown, still, for at least this share of every slide. */
@@ -142,10 +154,54 @@
    * 1.0 upscale and allowing up to 1.1 only when 1.0 is too little for a worthwhile move.
    */
   function availableZoom(focus, box, view, dpr, natural) {
-    var cap = Math.min(COMPOSITION_CAP, subjectZoomLimit(focus, box, view));
+    return sharpZoomWithin(Math.min(COMPOSITION_CAP, subjectZoomLimit(focus, box, view)), box, dpr, natural);
+  }
+
+  /** The deepest zoom up to `cap` that stays sharp: 1.0 upscale preferred, 1.1 only if 1.0 is too little. */
+  function sharpZoomWithin(cap, box, dpr, natural) {
     var zoom = Math.min(cap, sharpZoomLimit(box, dpr, natural, PREFERRED_UPSCALE));
     if (zoom < MIN_WORTHWHILE_ZOOM) zoom = Math.min(cap, sharpZoomLimit(box, dpr, natural, MAX_UPSCALE));
     return zoom;
+  }
+
+  /** A point of interest's box as a focus region (fractions). */
+  function pointFocus(point) {
+    return { x0: point.box[0], y0: point.box[1], x1: point.box[2], y1: point.box[3] };
+  }
+
+  /**
+   * Zoom for a point-of-interest subject: it fills about SUBJECT_SCREEN_SHARE of the screen, never more
+   * than COMPOSITION_CAP (POI_CONFIDENT_CAP when the model is sure), and never softer than the limits.
+   * Unlike an AI-crop strip, a subject box is always a real subject, whatever its size.
+   */
+  function poiZoom(focus, confidence, box, view, dpr, natural) {
+    var fw = Math.max((focus.x1 - focus.x0) * box.width, 1e-6);
+    var fh = Math.max((focus.y1 - focus.y0) * box.height, 1e-6);
+    var subjectLimit = Math.min((view.width * SUBJECT_SCREEN_SHARE) / fw, (view.height * SUBJECT_SCREEN_SHARE) / fh);
+    var cap = confidence >= POI_CONFIDENT_MIN ? POI_CONFIDENT_CAP : COMPOSITION_CAP;
+    return sharpZoomWithin(Math.min(cap, subjectLimit), box, dpr, natural);
+  }
+
+  /**
+   * What the move frames: points 1 and 2 together (a face with its hands, a rider with the horse) when
+   * that still leaves a worthwhile move, else point 1 alone (owner decision 2026-10-03: context first;
+   * the blind test penalised moves that cut the hands off portraits). Confidence is point 1's.
+   */
+  function choosePoiSubject(points, box, view, dpr, natural) {
+    var first = pointFocus(points[0]);
+    var confidence = points[0].confidence;
+    if (points.length > 1) {
+      var second = pointFocus(points[1]);
+      var both = {
+        x0: Math.min(first.x0, second.x0),
+        y0: Math.min(first.y0, second.y0),
+        x1: Math.max(first.x1, second.x1),
+        y1: Math.max(first.y1, second.y1),
+      };
+      var zoomBoth = poiZoom(both, confidence, box, view, dpr, natural);
+      if (zoomBoth >= MIN_WORTHWHILE_ZOOM) return { focus: both, zoom: zoomBoth };
+    }
+    return { focus: first, zoom: poiZoom(first, confidence, box, view, dpr, natural) };
   }
 
   /**
@@ -166,6 +222,12 @@
   /** Pose that puts image point (fx, fy) (fractions) at the screen centre, clamped to the edges. */
   function poseAt(fx, fy, scale, box, view) {
     return clampPose({ scale: scale, x: -scale * (fx - 0.5) * box.width, y: -scale * (fy - 0.5) * box.height }, box, view);
+  }
+
+  /** Pose that puts image point (fx, fy) at screen height `screenY` (0 top .. 1 bottom), clamped. */
+  function poseAtScreenY(fx, fy, screenY, scale, box, view) {
+    var y = (screenY - 0.5) * view.height - scale * (fy - 0.5) * box.height;
+    return clampPose({ scale: scale, x: -scale * (fx - 0.5) * box.width, y: y }, box, view);
   }
 
   /**
@@ -244,6 +306,9 @@
     // Never zoom speculatively into an image whose size is unknown.
     if (!known) return withReason(result, "unknown-size");
     if (!(o.durationMs >= MIN_GENTLE_SLIDE_MS)) return withReason(result, "short-slide");
+    // Points of interest, when sent, replace the AI crop entirely (2.7.0).
+    if (o.poi && o.poi.moveWorthy === false) return withReason(result, "not-move-worthy");
+    if (o.poi && o.poi.points && o.poi.points.length) return planPoiSlide(o, result);
     if (!isUsableFocus(o.focus)) return withReason(result, "no-focus");
     var zoom = availableZoom(o.focus, box, o.view, o.dpr, o.natural);
     if (zoom < MIN_WORTHWHILE_ZOOM) {
@@ -264,6 +329,30 @@
     result.reason = "ok";
     result.zoom = zoom;
     result.detailPose = keepStripHeadroom(o.focus, poseAt(cx, cy, zoom, box, o.view), box, o.view);
+    result.timeline = timeline;
+    return result;
+  }
+
+  /** The gentle plan toward points of interest (planSlide's 2.7.0 branch; same timing rules). */
+  function planPoiSlide(o, result) {
+    var chosen = choosePoiSubject(o.poi.points, result.box, o.view, o.dpr, o.natural);
+    result.subject = chosen.focus;
+    var zoom = chosen.zoom;
+    if (zoom < MIN_WORTHWHILE_ZOOM) {
+      result.zoom = zoom;
+      return withReason(result, "zoom-too-small");
+    }
+    zoom = Math.min(zoom, zoomThatFits(o.durationMs));
+    var timeline = zoom >= MIN_WORTHWHILE_ZOOM ? gentleTimeline(o.durationMs, zoom) : null;
+    if (!timeline) {
+      result.zoom = zoom;
+      return withReason(result, "short-slide");
+    }
+    var f = chosen.focus;
+    result.plan = "gentle";
+    result.reason = "ok";
+    result.zoom = zoom;
+    result.detailPose = poseAtScreenY((f.x0 + f.x1) / 2, (f.y0 + f.y1) / 2, POI_SCREEN_Y, zoom, result.box, o.view);
     result.timeline = timeline;
     return result;
   }
@@ -331,6 +420,9 @@
     MIN_WORTHWHILE_ZOOM: MIN_WORTHWHILE_ZOOM,
     SUBJECT_SCREEN_SHARE: SUBJECT_SCREEN_SHARE,
     STRIP_HEADROOM: STRIP_HEADROOM,
+    POI_CONFIDENT_CAP: POI_CONFIDENT_CAP,
+    POI_CONFIDENT_MIN: POI_CONFIDENT_MIN,
+    POI_SCREEN_Y: POI_SCREEN_Y,
     MIN_WHOLE_SHARE: MIN_WHOLE_SHARE,
     MIN_FOCUS_HOLD_MS: MIN_FOCUS_HOLD_MS,
     MOVE_EASING: MOVE_EASING,

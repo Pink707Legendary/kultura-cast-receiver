@@ -53,6 +53,43 @@
     return { x0: focus.x0, y0: focus.y0, x1: focus.x1, y1: focus.y1 };
   }
 
+  /** At most this many points of interest per artwork are kept (keeps a Cast message under its 64 KiB cap). */
+  var MAX_POI_POINTS = 4;
+
+  /** One point of interest: box [x0, y0, x1, y1] as fractions of the image, confidence 0..1 (required). */
+  function readPoint(point) {
+    if (!point || typeof point !== "object" || !Array.isArray(point.box) || point.box.length !== 4) return null;
+    for (var i = 0; i < 4; i++) {
+      var v = point.box[i];
+      if (!isFiniteNumber(v) || v < 0 || v > 1) return null;
+    }
+    if (point.box[2] <= point.box[0] || point.box[3] <= point.box[1]) return null;
+    var c = point.confidence;
+    // Untrusted input: a point whose confidence is missing or invalid is dropped, never guessed (it decides depth).
+    if (!isFiniteNumber(c) || c < 0 || c > 1) return null;
+    return { box: point.box.slice(), confidence: c };
+  }
+
+  /**
+   * Optional points of interest (additive, still protocol 2; receivers from 2.7.0 use them, older ones
+   * ignore the field): { moveWorthy, points: [{ box, confidence }] } ranked, most important first.
+   * Invalid points are dropped; a poi with no valid point is dropped too, unless it says not to move. A poi
+   * whose moveWorthy is not a boolean is dropped whole (it would decide between moving and staying still),
+   * so the artwork falls back to its AI-crop focus as before 2.7.0.
+   */
+  function readPoi(poi) {
+    if (!poi || typeof poi !== "object" || typeof poi.moveWorthy !== "boolean") return null;
+    var moveWorthy = poi.moveWorthy;
+    var points = [];
+    var raw = Array.isArray(poi.points) ? poi.points : [];
+    for (var i = 0; i < raw.length && points.length < MAX_POI_POINTS; i++) {
+      var p = readPoint(raw[i]);
+      if (p) points.push(p);
+    }
+    if (!points.length && moveWorthy) return null;
+    return { moveWorthy: moveWorthy, points: points };
+  }
+
   /** Returns a clean artwork object, or null if it cannot be shown safely. */
   function readArtwork(raw) {
     if (!raw || typeof raw !== "object") return null;
@@ -68,6 +105,7 @@
       imageUrl: raw.imageUrl,
       mainColor: colour,
       focus: readFocus(raw.focus),
+      poi: readPoi(raw.poi),
     };
     // Optional second image (the normal size) tried when imageUrl (the zoom tier) fails to load.
     if (isAllowedImageUrl(raw.fallbackImageUrl) && raw.fallbackImageUrl !== raw.imageUrl) {
