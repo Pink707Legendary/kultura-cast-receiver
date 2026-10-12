@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KULTURA — Ambient Gallery</title>
+  <link rel="stylesheet" href="css/receiver.css">
+</head>
+<!-- data-telemetry: js/telemetry.js loads Sentry (async, after startup, no personal data) -->
+<body data-telemetry="sentry">
+  <!-- Black under everything; each artwork layer below carries its own backdrop (tint/texture) -->
+  <div id="background"></div>
+
+  <!-- Two layers, each a complete scene: wall (backdrop) + painting + label. Between artworks the
+       painting fades out, the wall changes, the next painting fades in (receiver.js runTransition). -->
+  <div id="layer-a" class="artwork-layer">
+    <div class="layer-backdrop"></div>
+    <div class="layer-art">
+      <img class="artwork-image" alt="">
+      <div class="metadata-overlay">
+        <div class="metadata-title"></div>
+        <div class="metadata-artist"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="layer-b" class="artwork-layer">
+    <div class="layer-backdrop"></div>
+    <div class="layer-art">
+      <img class="artwork-image" alt="">
+      <div class="metadata-overlay">
+        <div class="metadata-title"></div>
+        <div class="metadata-artist"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Idle screen before manifest arrives -->
+  <div id="idle-screen">
+    <div class="idle-title">KULTURA</div>
+    <div class="idle-subtitle">Preparing your gallery</div>
+    <div class="idle-source"></div>
+    <!-- Animated while the gallery is starting or a new list is on its way (Cast checklist: app loading) -->
+    <div class="idle-spinner" aria-hidden="true"></div>
+  </div>
+
+  <!-- A painting is taking long to load while another is on screen (Cast checklist: content loading) -->
+  <div id="loading-indicator" class="hidden" aria-hidden="true">
+    <div class="small-spinner"></div>
+    <div class="indicator-text">Loading <span class="loading-title"></span></div>
+  </div>
+
+  <!-- Paused by a phone or the TV remote (Cast checklist: receiver paused). The text fades after a few
+       seconds, the pause icon stays. -->
+  <div id="paused-indicator" class="hidden" aria-hidden="true">
+    <div class="pause-icon"><span></span><span></span></div>
+    <div class="indicator-text"><span class="paused-label">Paused</span> · <span class="paused-position"></span> · <span class="paused-brand">KULTURA</span></div>
+  </div>
+
+  <!-- Google Cast Web Receiver SDK -->
+  <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+  <script src="js/motion.js"></script>
+  <script src="js/protocol.js"></script>
+  <script src="js/backdrop.js"></script>
+  <script src="js/playlist.js"></script>
+  <script src="js/idle.js"></script>
+  <script src="js/telemetry.js"></script>
+  <script src="js/walltour.js"></script>
+  <script src="js/wallview.js"></script>
+  <script src="js/receiver.js"></script>
+</body>
+</html>
