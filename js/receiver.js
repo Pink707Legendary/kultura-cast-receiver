@@ -18,14 +18,19 @@
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.7.0";
+  var RECEIVER_VERSION = "2.8.0";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**
-   * Stop by itself after this long without any phone message or remote key, so the TV returns to
-   * its own sleep/screensaver rules (the wake lock would otherwise keep an OLED lit all night).
+   * A painting that takes longer than this to load while another is on screen gets a small "Loading"
+   * tag. Google's checklist ("Receiver buffering") asks for a delay so the tag doesn't flash on every
+   * normal change.
    */
-  var UNATTENDED_STOP_MS = 3 * 60 * 60 * 1000;
+  var CONTENT_LOADING_INDICATOR_DELAY_MS = 2000;
+  /** With no list this long after the page started, the start screen stops spinning and says what to do. */
+  var WAITING_FOR_LIST_MS = 20000;
+  /** The "Paused · 3 of 40 · KULTURA" text fades after this long; the pause icon stays. */
+  var PAUSED_TEXT_FADE_MS = 8000;
   var IMAGE_LOAD_TIMEOUT_MS = 15000;
   /** Longest wait for img.decode() after the image has loaded. */
   var DECODE_WAIT_MAX_MS = 3000;
@@ -43,12 +48,18 @@
   var Backdrop = window.KulturaBackdrop;
   var Playlist = window.KulturaPlaylist;
   var Telemetry = window.KulturaTelemetry;
+  /** When the page stops by itself (idle, paused, unattended): idle.js. */
+  var Idle = window.KulturaIdle;
 
   // ─── DOM refs ───
   var layers = { a: document.getElementById("layer-a"), b: document.getElementById("layer-b") };
   var idleScreen = document.getElementById("idle-screen");
   var idleSubtitle = idleScreen.querySelector(".idle-subtitle");
   var idleSource = idleScreen.querySelector(".idle-source");
+  var loadingIndicator = document.getElementById("loading-indicator");
+  var loadingTitle = loadingIndicator.querySelector(".loading-title");
+  var pausedIndicator = document.getElementById("paused-indicator");
+  var pausedPosition = pausedIndicator.querySelector(".paused-position");
 
   // ─── State ───
   /** The list being played; replaced by every LOAD_MANIFEST (see playlist.js for the takeover rule). */
@@ -89,6 +100,13 @@
   /** True from a LOAD_MANIFEST until its first picture is on screen ("Preparing your gallery"). */
   var isPreparing = false;
   var lastError = null;
+  /** Auto-stop clocks (idle.js): since when there is nothing to show / the slideshow is paused. */
+  var nothingToShowSince = Date.now();
+  var pausedSince = null;
+  /** Why the page stopped by itself ("idle" | "paused" | "unattended"), for diagnostics and tests. */
+  var autoStoppedReason = null;
+  var loadingIndicatorTimer = null;
+  var pausedTextTimer = null;
 
   function setPhase(phase) {
     slidePhase = phase;
@@ -262,6 +280,16 @@
 
   // ─── Status back to the phone(s) ───
 
+  /** Phones connected to this TV page right now (null outside a Cast session, e.g. dev.html). */
+  function connectedSenderCount() {
+    if (!castContext || typeof castContext.getSenders !== "function") return null;
+    try {
+      return castContext.getSenders().length;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function sendStatus() {
     if (!castContext) return;
     var artwork = artworks[currentIndex] || null;
@@ -279,6 +307,9 @@
       manifestId: playlist.manifestId,
       backdrop: { texture: backdropTexture, mood: backdropMood },
       motion: motionMode,
+      // 2.8.0: how many phones are connected, so a phone offers "Disconnect" (TV keeps playing for the
+      // others) instead of "Stop casting" when it is not alone (Google Cast checklist: sender stops cast).
+      connectedSenders: connectedSenderCount(),
       debug: diagnostics(),
     };
     try {
@@ -362,16 +393,65 @@
 
   // ─── Slides ───
 
-  function showIdle(message, source) {
+  /** Full-screen KULTURA screen; `loading` adds the animated ring (something is on its way). */
+  function showIdle(message, source, loading) {
     idleSubtitle.textContent = message;
     idleSource.textContent = source || "";
+    idleScreen.classList.toggle("loading", !!loading);
     idleScreen.classList.remove("hidden");
+    hideLoadingIndicator();
   }
 
   /** Calm screen from a new list until its first picture is decoded (also covers a takeover). */
   function showPreparing() {
     isPreparing = true;
-    showIdle("Preparing your gallery", sourceName);
+    showIdle("Preparing your gallery", sourceName, true);
+  }
+
+  /** Put a tag in the lower corner opposite the wall label on screen (labels alternate corners). */
+  function placeIndicator(el) {
+    var label = layers[activeLayerId].querySelector(".metadata-overlay");
+    el.classList.toggle("on-left", label.classList.contains("label-right"));
+  }
+
+  /** Small "Loading <title>" tag, only once a painting is slow to appear (see the delay above). */
+  function scheduleLoadingIndicator(artwork) {
+    hideLoadingIndicator();
+    if (isPreparing) return; // the full-screen ring already says it
+    loadingIndicatorTimer = setTimeout(function () {
+      loadingIndicatorTimer = null;
+      loadingTitle.textContent = artwork.title.replace(/([^.])\.$/, "$1");
+      placeIndicator(loadingIndicator);
+      loadingIndicator.classList.remove("hidden");
+      document.body.classList.add("content-loading");
+    }, CONTENT_LOADING_INDICATOR_DELAY_MS);
+  }
+
+  function hideLoadingIndicator() {
+    clearTimeout(loadingIndicatorTimer);
+    loadingIndicatorTimer = null;
+    loadingIndicator.classList.add("hidden");
+    document.body.classList.remove("content-loading");
+  }
+
+  /** "Paused · 3 of 40 · KULTURA" while paused with a painting on screen; the text fades, the icon stays. */
+  function renderPausedIndicator() {
+    var show = isPaused && currentSlide != null && artworks.length > 0;
+    if (!show) {
+      clearTimeout(pausedTextTimer);
+      pausedTextTimer = null;
+      pausedIndicator.classList.add("hidden");
+      return;
+    }
+    pausedPosition.textContent = currentIndex + 1 + " of " + artworks.length;
+    placeIndicator(pausedIndicator);
+    if (!pausedIndicator.classList.contains("hidden")) return; // already showing: keep its fade state
+    pausedIndicator.classList.remove("quiet");
+    pausedIndicator.classList.remove("hidden");
+    clearTimeout(pausedTextTimer);
+    pausedTextTimer = setTimeout(function () {
+      pausedIndicator.classList.add("quiet");
+    }, PAUSED_TEXT_FADE_MS);
   }
 
   function showArtwork(index) {
@@ -390,6 +470,7 @@
     var img = new Image();
     img.alt = "";
     setPhase("loading");
+    scheduleLoadingIndicator(artwork);
     sendStatus();
 
     loadArtworkImage(img, artwork, token).then(
@@ -419,6 +500,7 @@
     if (consecutiveLoadFailures >= artworks.length) {
       setPhase("failed");
       isPreparing = false;
+      nothingToShowSince = Date.now();
       showIdle("Couldn't load the artworks. Check the TV's internet connection.");
       Telemetry.reportMessage("Cast receiver: no artwork could be loaded", "error", { category: "image", totalArtworks: artworks.length }, "all-images:" + playlist.generation);
       sendStatus();
@@ -500,6 +582,8 @@
     currentSlide = { artwork: artwork, img: img, url: loaded.url, fallbackUsed: loaded.fallbackUsed, natural: natural, dpr: dpr, plan: plan };
     setPhase("playing");
     isPreparing = false;
+    nothingToShowSince = null;
+    hideLoadingIndicator();
 
     // Some catalogue titles end with a stray full stop ("... Water Pitcher."); labels don't.
     // Alternate corners and nudge the position a little every slide (OLED burn-in).
@@ -529,6 +613,7 @@
     runTransition(outgoing, incoming, layerOpacityNow);
     activeLayerId = incomingId;
     idleScreen.classList.add("hidden");
+    renderPausedIndicator();
     requestWakeLock();
 
     preloadAhead();
@@ -638,7 +723,10 @@
 
   function setPaused(paused) {
     resetAnimationWatchdog();
+    if (paused && !isPaused) pausedSince = Date.now();
+    if (!paused) pausedSince = null;
     isPaused = paused;
+    renderPausedIndicator();
     if (slideAnimations) {
       if (paused) {
         slideAnimations.clock.pause();
@@ -666,6 +754,15 @@
   var lastActivity = Date.now();
 
   /**
+   * Someone is browsing the paused gallery by hand (NEXT / PREVIOUS from a phone or the TV remote):
+   * the 20-minute paused stop (idle.js) counts from now. Status requests and the automatic slide
+   * changes never come through here, so they never keep a forgotten paused TV awake.
+   */
+  function restartPausedClock() {
+    if (isPaused) pausedSince = Date.now();
+  }
+
+  /**
    * One message from a phone (or the TV remote). `senderId` is the Cast sender that sent it; it only
    * matters for APPEND_ARTWORKS (see playlist.js). A LOAD_MANIFEST from any sender always replaces
    * what is playing.
@@ -689,6 +786,9 @@
         if (result.restart) {
           if (command.secondsPerArtwork) secondsPerArtwork = command.secondsPerArtwork;
           isPaused = false;
+          pausedSince = null;
+          nothingToShowSince = null;
+          renderPausedIndicator();
           consecutiveLoadFailures = 0;
           showPreparing();
           showArtwork(0);
@@ -709,9 +809,11 @@
         else sendStatus();
         break;
       case "NEXT":
+        restartPausedClock();
         showArtwork(currentIndex + 1);
         break;
       case "PREVIOUS":
+        restartPausedClock();
         showArtwork(currentIndex - 1);
         break;
       case "PAUSE":
@@ -769,12 +871,22 @@
     handleMessage({ type: action });
   });
 
+  // ─── Auto-stop (idle.js: 5 min with nothing to show, 20 min paused, 3 h unattended) ───
   setInterval(function () {
-    if (artworks.length === 0 || Date.now() - lastActivity < UNATTENDED_STOP_MS) return;
-    console.log("[KULTURA] no activity for a long time: stopping so the TV can sleep");
+    if (autoStoppedReason) return;
+    var reason = Idle.autoStopReason({
+      now: Date.now(),
+      nothingToShowSince: nothingToShowSince,
+      pausedSince: isPaused ? pausedSince : null,
+      lastActivity: lastActivity,
+    });
+    if (!reason) return;
+    autoStoppedReason = reason;
+    console.log("[KULTURA] stopping by itself (" + reason + ") so the TV can sleep");
     if (wakeLock) wakeLock.release();
+    // Ends the receiver for every phone; each phone's Cast session ends and its controls go away.
     if (castContext) castContext.stop();
-  }, 60 * 1000);
+  }, Idle.CHECK_INTERVAL_MS);
 
   // ─── Watchdog ───
   // The slideshow advances on animation "finish" and image load events. If either never comes (a
@@ -841,14 +953,30 @@
     castContext.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function () {
       sendStatus();
     });
+    // The phones still connected learn the new count (connectedSenders). Sent again a moment later in
+    // case the framework still lists the leaving phone while this event runs.
+    if (cast.framework.system.EventType.SENDER_DISCONNECTED) {
+      castContext.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, function () {
+        sendStatus();
+        setTimeout(sendStatus, 1000);
+      });
+    }
 
     var options = new cast.framework.CastReceiverOptions();
+    // The framework's idle timeout watches its media player, which this page never uses: it stays off
+    // and the page stops itself instead (idle.js explains the rules and why). maxInactivity (the phone
+    // connection heartbeat, 10 s) keeps its default.
     options.disableIdleTimeout = true;
     castContext.start(options);
     console.log("[KULTURA] Cast receiver " + RECEIVER_VERSION + " started");
   }
 
-  showIdle("Preparing your gallery", "");
+  showIdle("Preparing your gallery", "", true);
+  // A phone that connects without sending a list (e.g. from the Cast button alone): say what to do.
+  setTimeout(function () {
+    if (artworks.length > 0 || isPreparing || slidePhase !== "idle") return;
+    showIdle("Choose artworks in the KULTURA app to show them here", "", false);
+  }, WAITING_FOR_LIST_MS);
 
   // ─── Dev mode hooks (dev.html drives the engine without a TV) ───
   window.kulturaReceiver = {
@@ -864,6 +992,11 @@
         phase: slidePhase,
         preparing: isPreparing,
         idleText: idleScreen.classList.contains("hidden") ? null : idleSubtitle.textContent + " | " + idleSource.textContent,
+        idleSpinner: !idleScreen.classList.contains("hidden") && idleScreen.classList.contains("loading"),
+        loadingIndicator: loadingIndicator.classList.contains("hidden") ? null : loadingTitle.textContent,
+        pausedIndicator: pausedIndicator.classList.contains("hidden") ? null : pausedIndicator.textContent.replace(/\s+/g, " ").trim(),
+        pausedTextFaded: pausedIndicator.classList.contains("quiet"),
+        autoStoppedReason: autoStoppedReason,
         progress: slideAnimations ? slideAnimations.clock.currentTime / slideDurationMs() : null,
       };
     },
