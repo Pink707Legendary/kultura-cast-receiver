@@ -48,6 +48,8 @@
     overscanPt: [0, 20000], // how far the covering runs beyond the paintings (wall points); applied at the next wall
     pieceLayers: "boolean", // each piece its own composited layer (raster scale not clamped by the whole wall's size)
     coveringRes: [1, 8], // the covering laid out this many times larger and scaled back down (sharper while moving)
+    coveringLayer: "boolean", // the covering its own composited layer
+    detailRes: "boolean", // the detail image laid out at its own pixel size, scaled down to the painting (sharp approach)
   };
 
   function readRenderFlags(flags) {

@@ -147,9 +147,9 @@
         covering.style.backgroundSize = px(tile * res) + " " + px(tile * res);
         covering.style.backgroundPosition = px(((overscan - b.minX) * L % tile) * res) + " " + px(((overscan - b.minY) * L % tile) * res);
         covering.style.transformOrigin = "0 0";
-        covering.style.transform = "scale(" + (1 / res).toFixed(5) + ")";
+        covering.style.transform = "scale(" + (1 / res).toFixed(5) + ")" + (renderFlags.coveringLayer ? " translateZ(0)" : "");
       } else {
-        covering.style.transform = "";
+        covering.style.transform = renderFlags.coveringLayer ? "translateZ(0)" : "";
       }
       piecesLayer.textContent = "";
       // The phone draws by artwork id, later on top: same here for overlapping Free-wall pieces.
@@ -299,8 +299,14 @@
       var box = slot.wrapper;
       box.style.left = px(piece.inner.x * L);
       box.style.top = px(piece.inner.y * L);
-      box.style.width = px(piece.inner.w * L);
-      box.style.height = px(piece.inner.h * L);
+      // Test-only (detailRes): laid out at the image's own pixel size and scaled down to the painting, so the
+      // layer may be rastered at the image's resolution while the camera moves (Chrome caps an animated layer's
+      // raster at ~1920 x 1920 of its own layout pixels).
+      var res = renderFlags.detailRes && slot.natural ? Math.max(1, slot.natural.width / (piece.inner.w * L)) : 1;
+      box.style.width = px(piece.inner.w * L * res);
+      box.style.height = px(piece.inner.h * L * res);
+      box.style.transformOrigin = "0 0";
+      box.style.transform = res > 1 ? "scale(" + (1 / res).toFixed(6) + ")" : "";
       if (slot.img.parentNode !== box) box.appendChild(slot.img);
       if (box.parentNode !== detailLayer) detailLayer.appendChild(box);
     }
