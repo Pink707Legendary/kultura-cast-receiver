@@ -507,7 +507,10 @@ html, body {
   transform: translateZ(0);
 }
 
-.rf-layer-will-change .wp.wp-layer {
+/* will-change (default; wallview.js planRender): Chrome keeps such a layer's largest raster when a move ends instead
+   of re-rastering it right then (a dropped frame as the camera eases in). wallview.js drops it again, while the
+   camera rests, from a layer whose raster has grown well past the view (shrunk on screen, a moulding would alias). */
+.wp.wp-layer.wp-hold {
   transform: none;
   will-change: transform;
 }

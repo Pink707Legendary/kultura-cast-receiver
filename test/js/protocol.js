@@ -49,7 +49,7 @@
     // The rendering fixes of 2.9.0 (wallrender.js), each on by default; these switch one off for A/B on the TV:
     shadowStyle: ["baked", "css"], // shadows and lips from computed images (default) or the original CSS blurs
     pieceLayers: ["near", "all", "off"], // own composited layers for paintings near the camera path / every one / none
-    layerHint: ["translateZ", "willChange"], // how a painting layer is made (will-change keeps its largest raster)
+    layerHint: ["willChange", "translateZ"], // painting layers keep their largest raster (default) or re-raster after each move
     maxPieceLayers: [0, 300], // cap on painting layers (default wallrender.js MAX_PIECE_LAYERS)
     frameTex: ["auto", "900", "450", "300", "150"], // moulding level of detail picked per frame (auto) or one size
     detailRes: "boolean", // false: the detail image laid out at the painting's size (blurrier while moving)

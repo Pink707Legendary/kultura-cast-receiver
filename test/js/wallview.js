@@ -27,6 +27,8 @@
    * a moment later nothing moves, so a slower frame shows nothing.
    */
   var STILL_WORK_DELAY_MS = 450;
+  /** A will-change painting layer is re-rastered (while still) once its raster is this much larger than the view. */
+  var WILL_CHANGE_RESET_RATIO = 1.3;
   /** The stage fades in over the start screen, and out when the wall mode ends. */
   var STAGE_FADE_MS = 900;
   /** A detail image that arrives after its fade-in time fades in on its own this fast. */
@@ -133,6 +135,8 @@
     /** The segment the layers, frame levels and detail placement were last updated for. */
     var renderSegment = null;
     var stillWorkTimer = null;
+    /** The next stop as planned during this one's release (upcomingViews), reused by startStop when it matches. */
+    var nextPlan = null;
     var lastError = null;
     /** Test-only render switches (protocol.js RENDER_FLAG_SPEC; {} = the normal look). */
     var renderFlags = {};
@@ -219,7 +223,7 @@
           var side = mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE);
           frame.style.borderColor = side + " " + side + " " + mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE * 0.67);
         }
-        pieceEls[p.index] = { node: node, frame: frame, img: img, src: null, lod: null, layer: false };
+        pieceEls[p.index] = { node: node, frame: frame, img: img, src: null, lod: null, layer: false, hold: false, rasterZoom: 0 };
         img.onerror = function () {
           // Main colour stays; the tour goes on.
           img.removeAttribute("src");
@@ -337,10 +341,13 @@
       if (!move && tour.order.length > 1) {
         var nextIndex = (stopIndex + 1) % tour.order.length;
         var slot = details[nextIndex];
-        var next = Tour.planStop(tour, nextIndex, {
+        var request = {
           from: tour.stops[stopIndex], flow: "auto", seconds: settings.seconds, motion: settings.motion,
           natural: slot && slot.state === "ready" ? slot.natural : null,
-        });
+        };
+        var next = Tour.planStop(tour, nextIndex, request);
+        // Kept for startStop: planning there costs main-thread time just as the next glide starts.
+        nextPlan = { index: nextIndex, request: request, stop: next };
         for (var j = 0; j < next.segments.length; j++) {
           if (next.segments[j].move) {
             move = next.segments[j];
@@ -368,13 +375,31 @@
         Render.pieceLayerPlan(tour.pieces, list, tour.screen, tour.layoutScale, cap).forEach(function (i) { want[i] = true; });
       }
       var layers = 0;
-      pieceEls.forEach(function (entry, i) {
-        var on = !!want[i];
+      var hold = renderFlags.layerHint !== "translateZ";
+      tour.pieces.forEach(function (p) {
+        var entry = pieceEls[p.index];
+        var on = !!want[p.index];
         if (on !== entry.layer) {
           entry.layer = on;
           entry.node.classList.toggle("wp-layer", on);
         }
         if (on) layers++;
+        // will-change layers keep the largest raster they had (rasterZoom: the closest camera they were seen at).
+        // One shown now at a camera much further out than that is re-rastered now, while the camera rests
+        // (will-change off for one plan), so its mouldings are not shrunk on screen; it holds again from the next.
+        var seenNow = Render.viewShows(views.now, p, tour.screen, 0.1);
+        var seenNext = Render.viewShows(views.next, p, tour.screen, 0.1);
+        var wantHold = on && hold;
+        if (wantHold && entry.hold && seenNow && entry.rasterZoom > views.now.zoom * WILL_CHANGE_RESET_RATIO) wantHold = false;
+        if (wantHold !== entry.hold) {
+          entry.hold = wantHold;
+          entry.node.classList.toggle("wp-hold", wantHold);
+          entry.rasterZoom = 0;
+        }
+        if (on) {
+          if (seenNow) entry.rasterZoom = Math.max(entry.rasterZoom || 0, views.now.zoom);
+          if (seenNext) entry.rasterZoom = Math.max(entry.rasterZoom || 0, views.next.zoom);
+        }
       });
       var fixed = renderFlags.frameTex && renderFlags.frameTex !== "auto" ? Number(renderFlags.frameTex) : null;
       var counts = {};
@@ -438,7 +463,12 @@
     // ─── Detail images (at most two decoded: the stop on screen and the next) ───
 
     function detailFor(position) {
-      if (details[position]) return details[position];
+      var kept = details[position];
+      if (kept && kept.retiring) {
+        kept.retiring = false; // wanted again (PREVIOUS)
+        if (kept.wrapper) kept.wrapper.style.visibility = "";
+      }
+      if (kept) return kept;
       var piece = tour.pieces[tour.order[position]];
       var slot = { position: position, img: new Image(), state: "loading", natural: null, url: null, fallbackUsed: false, wrapper: null };
       slot.img.alt = "";
@@ -485,6 +515,12 @@
       if (details[slot.position] === slot) delete details[slot.position];
     }
 
+    /** Hide a detail image without freeing it yet (stillWork frees it). */
+    function retireDetail(slot) {
+      slot.retiring = true;
+      if (slot.wrapper) slot.wrapper.style.visibility = "hidden";
+    }
+
     /**
      * Keep only the details of `position` and the next stop; start loading both. An outgoing image still fading
      * out (NEXT / PREVIOUS) counts as one of the two: the next stop's image then waits until it is released
@@ -496,8 +532,11 @@
       Object.keys(details).forEach(function (key) {
         var k = Number(key);
         if (k === position || k === next) return;
-        // Only the image just left may still be fading; any other goes now.
+        // Only the image just left may still be fading; any other goes now. The stop just finished's image (faded
+        // out during its release) goes once the camera rests again (stillWork): freeing it right as the glide starts
+        // costs a frame. It counts as one of the two until then: the next one is asked for at the hold.
         if (details[k].fading && details[k] === fadingSlot) fadingOther = true;
+        else if (renderFlags.detailTiming !== "early" && k === (position - 1 + tour.order.length) % tour.order.length && !details[k].retiring) retireDetail(details[k]);
         else releaseDetail(details[k]);
       });
       var current = detailFor(position);
@@ -648,7 +687,12 @@
       var slot = manageDetails(position);
       stopRequest = { from: from, flow: flow, leadInMs: leadIn, seconds: settings.seconds, motion: settings.motion, natural: slot.state === "ready" ? slot.natural : null };
       closeUpDropped = false;
-      stop = Tour.planStop(tour, position, stopRequest);
+      var cached = nextPlan;
+      nextPlan = null;
+      var same = cached && cached.index === position && flow === "auto" && cached.request.from === from &&
+        cached.request.seconds === stopRequest.seconds && cached.request.motion === stopRequest.motion &&
+        JSON.stringify(cached.request.natural) === JSON.stringify(stopRequest.natural) && !leadIn;
+      stop = same ? cached.stop : Tour.planStop(tour, position, stopRequest);
       applyImagePlan(stop, 0);
       plannedSegment = stop.segments[0];
 
@@ -784,6 +828,9 @@
     function stillWork(seg) {
       if (!anims || !stop || renderSegment !== seg) return;
       var t = Math.max(clockTime(), seg.startMs);
+      Object.keys(details).forEach(function (k) {
+        if (details[k].retiring) releaseDetail(details[k]);
+      });
       planRender(t);
       if (t < stop.arrivalMs - 1) return;
       var here = details[stopIndex];
@@ -813,7 +860,6 @@
         "rf-no-light": renderFlags.light === false,
         "rf-no-glass": renderFlags.glass === false,
         "rf-css-shadows": renderFlags.shadowStyle === "css" || shadowsLive,
-        "rf-layer-will-change": renderFlags.layerHint === "willChange",
       };
       for (var name in classes) stage.classList.toggle(name, classes[name]);
       camera.style.willChange = renderFlags.willChange ? "transform" : "";
@@ -871,6 +917,7 @@
       piecesLayer.textContent = "";
       detailLayer.textContent = "";
       shadowImages = {};
+      nextPlan = null;
       shadowsLive = false;
       stage.classList.toggle("rf-css-shadows", renderFlags.shadowStyle === "css");
       lodPreload = [];
