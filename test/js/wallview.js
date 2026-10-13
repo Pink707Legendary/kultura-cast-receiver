@@ -555,6 +555,8 @@
         "rf-no-light": renderFlags.light === false,
         "rf-no-glass": renderFlags.glass === false,
         "rf-piece-layers": renderFlags.pieceLayers === true,
+        "rf-frametex-450": renderFlags.frameTex === "450",
+        "rf-frametex-300": renderFlags.frameTex === "300",
       };
       for (var name in classes) stage.classList.toggle(name, classes[name]);
       camera.style.willChange = renderFlags.willChange ? "transform" : "";

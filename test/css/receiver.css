@@ -466,3 +466,36 @@ html, body {
 .rf-piece-layers .wp {
   transform: translateZ(0);
 }
+
+/* Render flag frameTex (test-only): the same mouldings pre-filtered to 450 or 300 px (fewer moire dots and less
+   shimmer where the TV shrinks them; Android Chrome draws CSS images without mipmaps). */
+.rf-frametex-450 .wp-frame[data-frame="gold"] { border-image-source: url(../wall/lod450/frame-carved-gold-deep.webp); }
+.rf-frametex-450 .wp-frame[data-frame="gilded"] { border-image-source: url(../wall/lod450/frame-gilded-gold.webp); }
+.rf-frametex-450 .wp-frame[data-frame="walnut"] { border-image-source: url(../wall/lod450/frame-dark-walnut.webp); }
+.rf-frametex-450 .wp-frame[data-frame="lacquer"] { border-image-source: url(../wall/lod450/frame-black-lacquer.webp); }
+.rf-frametex-450 .wp-frame[data-frame="oak"] { border-image-source: url(../wall/lod450/frame-oak-thin.webp); }
+.rf-frametex-450 .wp-frame[data-frame="thin"] { border-image-source: url(../wall/lod450/frame-black-thin.webp); }
+.rf-frametex-450 .wp-frame[data-frame="float"] { border-image-source: url(../wall/lod450/frame-float-walnut.webp); }
+.rf-frametex-450 .wp-frame[data-frame="cassetta"] { border-image-source: url(../wall/lod450/frame-renaissance-cassetta.webp); }
+.rf-frametex-450 .wp-frame[data-frame="acanthus"] { border-image-source: url(../wall/lod450/frame-baroque-acanthus.webp); }
+.rf-frametex-450 .wp-frame[data-frame="venetian"] { border-image-source: url(../wall/lod450/frame-venetian-worn-gold.webp); }
+.rf-frametex-450 .wp-frame[data-frame="louis"] { border-image-source: url(../wall/lod450/frame-louis-silver.webp); }
+.rf-frametex-450 .wp-frame[data-frame="victorian"] { border-image-source: url(../wall/lod450/frame-victorian-linen.webp); }
+.rf-frametex-450 .wp-frame[data-frame="ripple"] { border-image-source: url(../wall/lod450/frame-dutch-ebony-ripple.webp); }
+.rf-frametex-450 .wp-frame[data-frame="maple"] { border-image-source: url(../wall/lod450/frame-maple-box.webp); }
+.rf-frametex-450 .wp-frame[data-frame="brass"] { border-image-source: url(../wall/lod450/frame-brass-slim.webp); }
+.rf-frametex-300 .wp-frame[data-frame="gold"] { border-image-source: url(../wall/lod300/frame-carved-gold-deep.webp); }
+.rf-frametex-300 .wp-frame[data-frame="gilded"] { border-image-source: url(../wall/lod300/frame-gilded-gold.webp); }
+.rf-frametex-300 .wp-frame[data-frame="walnut"] { border-image-source: url(../wall/lod300/frame-dark-walnut.webp); }
+.rf-frametex-300 .wp-frame[data-frame="lacquer"] { border-image-source: url(../wall/lod300/frame-black-lacquer.webp); }
+.rf-frametex-300 .wp-frame[data-frame="oak"] { border-image-source: url(../wall/lod300/frame-oak-thin.webp); }
+.rf-frametex-300 .wp-frame[data-frame="thin"] { border-image-source: url(../wall/lod300/frame-black-thin.webp); }
+.rf-frametex-300 .wp-frame[data-frame="float"] { border-image-source: url(../wall/lod300/frame-float-walnut.webp); }
+.rf-frametex-300 .wp-frame[data-frame="cassetta"] { border-image-source: url(../wall/lod300/frame-renaissance-cassetta.webp); }
+.rf-frametex-300 .wp-frame[data-frame="acanthus"] { border-image-source: url(../wall/lod300/frame-baroque-acanthus.webp); }
+.rf-frametex-300 .wp-frame[data-frame="venetian"] { border-image-source: url(../wall/lod300/frame-venetian-worn-gold.webp); }
+.rf-frametex-300 .wp-frame[data-frame="louis"] { border-image-source: url(../wall/lod300/frame-louis-silver.webp); }
+.rf-frametex-300 .wp-frame[data-frame="victorian"] { border-image-source: url(../wall/lod300/frame-victorian-linen.webp); }
+.rf-frametex-300 .wp-frame[data-frame="ripple"] { border-image-source: url(../wall/lod300/frame-dutch-ebony-ripple.webp); }
+.rf-frametex-300 .wp-frame[data-frame="maple"] { border-image-source: url(../wall/lod300/frame-maple-box.webp); }
+.rf-frametex-300 .wp-frame[data-frame="brass"] { border-image-source: url(../wall/lod300/frame-brass-slim.webp); }
