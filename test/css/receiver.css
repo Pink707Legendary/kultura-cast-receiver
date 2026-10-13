@@ -324,15 +324,35 @@ html, body {
   position: absolute;
 }
 
-/* website wall.module.css .shadow (a canvas stands off the wall: deeper, down and to the right) */
+/* The shadow on the wall (website wall.module.css .shadow: a canvas stands off the wall, deeper, down and to the
+   right). Drawn from images wallview.js computes once per wall (wallrender.js: the same Gaussian blur as these
+   box-shadows, set inline as a nine-slice border-image or a per-size background): a live blur cost the TV's GPU the
+   most raster time of anything on the wall. The box-shadows below are the reference (RENDER_FLAGS shadowStyle css). */
 .wp-shadow {
   position: absolute;
   inset: 0;
+  border: 0 solid transparent;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
+.rf-css-shadows .wp-shadow,
+.rf-css-shadows .wp-lip {
+  left: 0 !important;
+  top: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  border-width: 0 !important;
+}
+
+.rf-css-shadows .wp-shadow {
+  border-image: none !important;
+  background-image: none !important;
   box-shadow: 0 calc(30 * var(--u)) calc(40 * var(--u)) calc(-12 * var(--u)) rgba(0, 0, 0, 0.7),
     0 calc(8 * var(--u)) calc(14 * var(--u)) rgba(0, 0, 0, 0.42);
 }
 
-.wp[data-frame="canvas"] .wp-shadow {
+.rf-css-shadows .wp[data-frame="canvas"] .wp-shadow {
   box-shadow: calc(16 * var(--u)) calc(30 * var(--u)) calc(38 * var(--u)) calc(-10 * var(--u)) rgba(0, 0, 0, 0.72),
     calc(5 * var(--u)) calc(9 * var(--u)) calc(14 * var(--u)) rgba(0, 0, 0, 0.42);
 }
@@ -358,22 +378,30 @@ html, body {
   display: block;
 }
 
+/* The lip: the frame's shade on the painting's edge (inset shadows; drawn from images like .wp-shadow). */
 .wp-lip {
   position: absolute;
   inset: 0;
+  border: 0 solid transparent;
+  background-repeat: no-repeat;
+}
+
+.rf-css-shadows .wp-lip {
+  border-image: none !important;
+  background-image: none !important;
   box-shadow: inset 0 calc(6 * var(--u)) calc(9 * var(--u)) calc(-2 * var(--u)) rgba(0, 0, 0, 0.55),
     inset 0 0 calc(3 * var(--u)) var(--u) rgba(0, 0, 0, 0.45);
 }
 
-.wp[data-frame="oak"] .wp-lip,
-.wp[data-frame="maple"] .wp-lip,
-.wp[data-frame="brass"] .wp-lip,
-.wp[data-frame="thin"] .wp-lip,
-.wp[data-frame="float"] .wp-lip {
+.rf-css-shadows .wp[data-frame="oak"] .wp-lip,
+.rf-css-shadows .wp[data-frame="maple"] .wp-lip,
+.rf-css-shadows .wp[data-frame="brass"] .wp-lip,
+.rf-css-shadows .wp[data-frame="thin"] .wp-lip,
+.rf-css-shadows .wp[data-frame="float"] .wp-lip {
   box-shadow: inset 0 calc(2 * var(--u)) calc(4 * var(--u)) rgba(0, 0, 0, 0.35);
 }
 
-.wp[data-frame="canvas"] .wp-lip {
+.rf-css-shadows .wp[data-frame="canvas"] .wp-lip {
   box-shadow: inset 0 0 var(--u) rgba(0, 0, 0, 0.45);
 }
 
@@ -463,39 +491,63 @@ html, body {
   backdrop-filter: none;
   background: rgba(12, 12, 12, 0.7);
 }
-.rf-piece-layers .wp {
+/* A painting near the camera's path: its own small composited layer (frame, image, lip and shadow together), so
+   Chrome rasters it at full resolution while the camera moves (one huge animated layer is capped to ~1 screen of
+   pixels: blur). wallview.js bounds how many (wallrender.js MAX_PIECE_LAYERS). */
+.wp.wp-layer {
   transform: translateZ(0);
 }
 
-/* Render flag frameTex (test-only): the same mouldings pre-filtered to 450 or 300 px (fewer moire dots and less
-   shimmer where the TV shrinks them; Android Chrome draws CSS images without mipmaps). */
-.rf-frametex-450 .wp-frame[data-frame="gold"] { border-image-source: url(../wall/lod450/frame-carved-gold-deep.webp); }
-.rf-frametex-450 .wp-frame[data-frame="gilded"] { border-image-source: url(../wall/lod450/frame-gilded-gold.webp); }
-.rf-frametex-450 .wp-frame[data-frame="walnut"] { border-image-source: url(../wall/lod450/frame-dark-walnut.webp); }
-.rf-frametex-450 .wp-frame[data-frame="lacquer"] { border-image-source: url(../wall/lod450/frame-black-lacquer.webp); }
-.rf-frametex-450 .wp-frame[data-frame="oak"] { border-image-source: url(../wall/lod450/frame-oak-thin.webp); }
-.rf-frametex-450 .wp-frame[data-frame="thin"] { border-image-source: url(../wall/lod450/frame-black-thin.webp); }
-.rf-frametex-450 .wp-frame[data-frame="float"] { border-image-source: url(../wall/lod450/frame-float-walnut.webp); }
-.rf-frametex-450 .wp-frame[data-frame="cassetta"] { border-image-source: url(../wall/lod450/frame-renaissance-cassetta.webp); }
-.rf-frametex-450 .wp-frame[data-frame="acanthus"] { border-image-source: url(../wall/lod450/frame-baroque-acanthus.webp); }
-.rf-frametex-450 .wp-frame[data-frame="venetian"] { border-image-source: url(../wall/lod450/frame-venetian-worn-gold.webp); }
-.rf-frametex-450 .wp-frame[data-frame="louis"] { border-image-source: url(../wall/lod450/frame-louis-silver.webp); }
-.rf-frametex-450 .wp-frame[data-frame="victorian"] { border-image-source: url(../wall/lod450/frame-victorian-linen.webp); }
-.rf-frametex-450 .wp-frame[data-frame="ripple"] { border-image-source: url(../wall/lod450/frame-dutch-ebony-ripple.webp); }
-.rf-frametex-450 .wp-frame[data-frame="maple"] { border-image-source: url(../wall/lod450/frame-maple-box.webp); }
-.rf-frametex-450 .wp-frame[data-frame="brass"] { border-image-source: url(../wall/lod450/frame-brass-slim.webp); }
-.rf-frametex-300 .wp-frame[data-frame="gold"] { border-image-source: url(../wall/lod300/frame-carved-gold-deep.webp); }
-.rf-frametex-300 .wp-frame[data-frame="gilded"] { border-image-source: url(../wall/lod300/frame-gilded-gold.webp); }
-.rf-frametex-300 .wp-frame[data-frame="walnut"] { border-image-source: url(../wall/lod300/frame-dark-walnut.webp); }
-.rf-frametex-300 .wp-frame[data-frame="lacquer"] { border-image-source: url(../wall/lod300/frame-black-lacquer.webp); }
-.rf-frametex-300 .wp-frame[data-frame="oak"] { border-image-source: url(../wall/lod300/frame-oak-thin.webp); }
-.rf-frametex-300 .wp-frame[data-frame="thin"] { border-image-source: url(../wall/lod300/frame-black-thin.webp); }
-.rf-frametex-300 .wp-frame[data-frame="float"] { border-image-source: url(../wall/lod300/frame-float-walnut.webp); }
-.rf-frametex-300 .wp-frame[data-frame="cassetta"] { border-image-source: url(../wall/lod300/frame-renaissance-cassetta.webp); }
-.rf-frametex-300 .wp-frame[data-frame="acanthus"] { border-image-source: url(../wall/lod300/frame-baroque-acanthus.webp); }
-.rf-frametex-300 .wp-frame[data-frame="venetian"] { border-image-source: url(../wall/lod300/frame-venetian-worn-gold.webp); }
-.rf-frametex-300 .wp-frame[data-frame="louis"] { border-image-source: url(../wall/lod300/frame-louis-silver.webp); }
-.rf-frametex-300 .wp-frame[data-frame="victorian"] { border-image-source: url(../wall/lod300/frame-victorian-linen.webp); }
-.rf-frametex-300 .wp-frame[data-frame="ripple"] { border-image-source: url(../wall/lod300/frame-dutch-ebony-ripple.webp); }
-.rf-frametex-300 .wp-frame[data-frame="maple"] { border-image-source: url(../wall/lod300/frame-maple-box.webp); }
-.rf-frametex-300 .wp-frame[data-frame="brass"] { border-image-source: url(../wall/lod300/frame-brass-slim.webp); }
+.rf-layer-will-change .wp.wp-layer {
+  transform: none;
+  will-change: transform;
+}
+
+/* Frame level of detail (wallrender.js frameLod, set by wallview.js as data-lod while the camera is still): the
+   same mouldings pre-filtered to 450 / 300 / 150 px (scripts/make_frame_lods.py), so a band a few device px wide
+   shows no moire. No data-lod (or 900) = the website's 900 px texture. */
+.wp-frame[data-lod="450"][data-frame="gold"] { border-image-source: url(../wall/lod450/frame-carved-gold-deep.webp); }
+.wp-frame[data-lod="450"][data-frame="gilded"] { border-image-source: url(../wall/lod450/frame-gilded-gold.webp); }
+.wp-frame[data-lod="450"][data-frame="walnut"] { border-image-source: url(../wall/lod450/frame-dark-walnut.webp); }
+.wp-frame[data-lod="450"][data-frame="lacquer"] { border-image-source: url(../wall/lod450/frame-black-lacquer.webp); }
+.wp-frame[data-lod="450"][data-frame="oak"] { border-image-source: url(../wall/lod450/frame-oak-thin.webp); }
+.wp-frame[data-lod="450"][data-frame="thin"] { border-image-source: url(../wall/lod450/frame-black-thin.webp); }
+.wp-frame[data-lod="450"][data-frame="float"] { border-image-source: url(../wall/lod450/frame-float-walnut.webp); }
+.wp-frame[data-lod="450"][data-frame="cassetta"] { border-image-source: url(../wall/lod450/frame-renaissance-cassetta.webp); }
+.wp-frame[data-lod="450"][data-frame="acanthus"] { border-image-source: url(../wall/lod450/frame-baroque-acanthus.webp); }
+.wp-frame[data-lod="450"][data-frame="venetian"] { border-image-source: url(../wall/lod450/frame-venetian-worn-gold.webp); }
+.wp-frame[data-lod="450"][data-frame="louis"] { border-image-source: url(../wall/lod450/frame-louis-silver.webp); }
+.wp-frame[data-lod="450"][data-frame="victorian"] { border-image-source: url(../wall/lod450/frame-victorian-linen.webp); }
+.wp-frame[data-lod="450"][data-frame="ripple"] { border-image-source: url(../wall/lod450/frame-dutch-ebony-ripple.webp); }
+.wp-frame[data-lod="450"][data-frame="maple"] { border-image-source: url(../wall/lod450/frame-maple-box.webp); }
+.wp-frame[data-lod="450"][data-frame="brass"] { border-image-source: url(../wall/lod450/frame-brass-slim.webp); }
+.wp-frame[data-lod="300"][data-frame="gold"] { border-image-source: url(../wall/lod300/frame-carved-gold-deep.webp); }
+.wp-frame[data-lod="300"][data-frame="gilded"] { border-image-source: url(../wall/lod300/frame-gilded-gold.webp); }
+.wp-frame[data-lod="300"][data-frame="walnut"] { border-image-source: url(../wall/lod300/frame-dark-walnut.webp); }
+.wp-frame[data-lod="300"][data-frame="lacquer"] { border-image-source: url(../wall/lod300/frame-black-lacquer.webp); }
+.wp-frame[data-lod="300"][data-frame="oak"] { border-image-source: url(../wall/lod300/frame-oak-thin.webp); }
+.wp-frame[data-lod="300"][data-frame="thin"] { border-image-source: url(../wall/lod300/frame-black-thin.webp); }
+.wp-frame[data-lod="300"][data-frame="float"] { border-image-source: url(../wall/lod300/frame-float-walnut.webp); }
+.wp-frame[data-lod="300"][data-frame="cassetta"] { border-image-source: url(../wall/lod300/frame-renaissance-cassetta.webp); }
+.wp-frame[data-lod="300"][data-frame="acanthus"] { border-image-source: url(../wall/lod300/frame-baroque-acanthus.webp); }
+.wp-frame[data-lod="300"][data-frame="venetian"] { border-image-source: url(../wall/lod300/frame-venetian-worn-gold.webp); }
+.wp-frame[data-lod="300"][data-frame="louis"] { border-image-source: url(../wall/lod300/frame-louis-silver.webp); }
+.wp-frame[data-lod="300"][data-frame="victorian"] { border-image-source: url(../wall/lod300/frame-victorian-linen.webp); }
+.wp-frame[data-lod="300"][data-frame="ripple"] { border-image-source: url(../wall/lod300/frame-dutch-ebony-ripple.webp); }
+.wp-frame[data-lod="300"][data-frame="maple"] { border-image-source: url(../wall/lod300/frame-maple-box.webp); }
+.wp-frame[data-lod="300"][data-frame="brass"] { border-image-source: url(../wall/lod300/frame-brass-slim.webp); }
+.wp-frame[data-lod="150"][data-frame="gold"] { border-image-source: url(../wall/lod150/frame-carved-gold-deep.webp); }
+.wp-frame[data-lod="150"][data-frame="gilded"] { border-image-source: url(../wall/lod150/frame-gilded-gold.webp); }
+.wp-frame[data-lod="150"][data-frame="walnut"] { border-image-source: url(../wall/lod150/frame-dark-walnut.webp); }
+.wp-frame[data-lod="150"][data-frame="lacquer"] { border-image-source: url(../wall/lod150/frame-black-lacquer.webp); }
+.wp-frame[data-lod="150"][data-frame="oak"] { border-image-source: url(../wall/lod150/frame-oak-thin.webp); }
+.wp-frame[data-lod="150"][data-frame="thin"] { border-image-source: url(../wall/lod150/frame-black-thin.webp); }
+.wp-frame[data-lod="150"][data-frame="float"] { border-image-source: url(../wall/lod150/frame-float-walnut.webp); }
+.wp-frame[data-lod="150"][data-frame="cassetta"] { border-image-source: url(../wall/lod150/frame-renaissance-cassetta.webp); }
+.wp-frame[data-lod="150"][data-frame="acanthus"] { border-image-source: url(../wall/lod150/frame-baroque-acanthus.webp); }
+.wp-frame[data-lod="150"][data-frame="venetian"] { border-image-source: url(../wall/lod150/frame-venetian-worn-gold.webp); }
+.wp-frame[data-lod="150"][data-frame="louis"] { border-image-source: url(../wall/lod150/frame-louis-silver.webp); }
+.wp-frame[data-lod="150"][data-frame="victorian"] { border-image-source: url(../wall/lod150/frame-victorian-linen.webp); }
+.wp-frame[data-lod="150"][data-frame="ripple"] { border-image-source: url(../wall/lod150/frame-dutch-ebony-ripple.webp); }
+.wp-frame[data-lod="150"][data-frame="maple"] { border-image-source: url(../wall/lod150/frame-maple-box.webp); }
+.wp-frame[data-lod="150"][data-frame="brass"] { border-image-source: url(../wall/lod150/frame-brass-slim.webp); }

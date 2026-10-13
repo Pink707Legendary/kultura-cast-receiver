@@ -19,6 +19,10 @@
  * slideshow and plays a camera tour of the person's wall (planned in walltour.js, drawn by wallview.js);
  * LOAD_MANIFEST leaves the wall for the slideshow. The remote commands, settings, auto-stop and the test-only
  * SEEK work in both modes; in wall mode STATUS counts painting stops.
+ *
+ * OLED burn-in safeguard (2.9.0, rules and numbers in idle.js): a wall paused for a minute drifts very slowly
+ * (syncOledDrift), a paused wall stops after 10 minutes, and a test-only freeze (SEEK pause) plays on by itself
+ * after 3 minutes (armDebugFreeze).
  */
 (function () {
   "use strict";
@@ -129,6 +133,21 @@
   var wallState = null;
   var wallAssemblyTimer = null;
   var wallView = null;
+  /**
+   * OLED drift (idle.js oledDriftDue / oledDriftTransform): when the paused wall last stopped moving (the pause,
+   * a NEXT / PREVIOUS while paused, a test SEEK), and the drift on the wall stage while it runs:
+   * { startedAt, scaleIn (the 2 % scale-in animation, null once done), transform (static, after the scale-in) }.
+   */
+  var wallStillSince = null;
+  var oledDrift = null;
+  var oledDriftTimer = null;
+  /** The drift's static transform is re-checked this often; it changes about once per device px (every few s). */
+  var OLED_DRIFT_TICK_MS = 1000;
+  /** Back from the drift to the tour's own framing on resume. */
+  var OLED_DRIFT_RETURN_MS = 1000;
+  /** Test-only freeze: the last SEEK with pause: true (null when none is in force), and its release timer. */
+  var debugFrozenSince = null;
+  var debugFreezeTimer = null;
 
   function setPhase(phase) {
     slidePhase = phase;
@@ -281,6 +300,7 @@
       transitionMs: Motion.TRANSITION_MS,
       debugMode: debugMode,
       renderFlags: renderFlags,
+      oled: oledDiagnostics(),
       frameMs: frameTimeStats(),
       phaseMs: Date.now() - phaseStartedAt,
       preparing: isPreparing,
@@ -786,12 +806,16 @@
 
   function setPaused(paused) {
     resetAnimationWatchdog();
-    if (paused && !isPaused) pausedSince = Date.now();
+    if (paused && !isPaused) {
+      pausedSince = Date.now();
+      wallStillSince = pausedSince;
+    }
     if (!paused) pausedSince = null;
     isPaused = paused;
     renderPausedIndicator();
     if (mode === "wall") {
       if (wallView) wallView.setPaused(paused);
+      syncOledDrift();
     } else if (slideAnimations) {
       if (paused) {
         slideAnimations.clock.pause();
@@ -824,7 +848,119 @@
    * changes never come through here, so they never keep a forgotten paused TV awake.
    */
   function restartPausedClock() {
-    if (isPaused) pausedSince = Date.now();
+    if (!isPaused) return;
+    pausedSince = Date.now();
+    wallStillSince = pausedSince; // the camera glides to the next stop: the drift waits a minute again
+    syncOledDrift();
+  }
+
+  // ─── OLED safeguard (idle.js) ───
+
+  /** The wall's paused stillness clock: null unless a started wall is paused. */
+  function wallStillClock() {
+    return mode === "wall" && isPaused && wallState && wallState.started ? wallStillSince : null;
+  }
+
+  /**
+   * Start, advance or stop the drift of the paused wall. Called on every pause / resume / jump / SEEK / wall
+   * change, and by its own timer while it is due or pending. The drift is a static transform on #wall-stage
+   * (created by wallview.js), so the still picture stays sharp; only its first minute is a compositor animation
+   * (the 2 % scale-in, too slow to see). The pause icon (outside the stage) moves with the offset.
+   */
+  function syncOledDrift() {
+    clearTimeout(oledDriftTimer);
+    oledDriftTimer = null;
+    var now = Date.now();
+    var stillSince = wallStillClock();
+    var stage = document.getElementById("wall-stage");
+    if (!stage || !Idle.oledDriftDue({ now: now, mode: mode, stillSince: stillSince })) {
+      // Smooth only when the tour plays on; a paused jump or a test SEEK resets at once (exact test frames).
+      stopOledDrift(mode === "wall" && !isPaused);
+      if (stage && stillSince != null) oledDriftTimer = setTimeout(syncOledDrift, Math.max(0, stillSince + Idle.OLED_DRIFT_START_MS - now));
+      return;
+    }
+    if (!oledDrift) {
+      oledDrift = {
+        startedAt: now,
+        scaleIn: stage.animate(Idle.oledDriftScaleInKeyframes(), { duration: Idle.OLED_DRIFT_SCALE_IN_MS, fill: "forwards" }),
+        transform: null,
+        x: 0,
+        y: 0,
+      };
+    }
+    var elapsed = now - oledDrift.startedAt;
+    if (elapsed >= Idle.OLED_DRIFT_SCALE_IN_MS) {
+      var drift = Idle.oledDriftTransform(elapsed, window.devicePixelRatio || 1);
+      if (drift.transform !== oledDrift.transform) {
+        stage.style.transform = drift.transform;
+        pausedIndicator.style.transform = "translate(" + drift.x + "px, " + drift.y + "px)";
+        oledDrift.transform = drift.transform;
+        oledDrift.x = drift.x;
+        oledDrift.y = drift.y;
+      }
+      // The static transform is in place (same value as the animation's end): the animation can go.
+      if (oledDrift.scaleIn) {
+        oledDrift.scaleIn.cancel();
+        oledDrift.scaleIn = null;
+      }
+    }
+    oledDriftTimer = setTimeout(syncOledDrift, OLED_DRIFT_TICK_MS);
+  }
+
+  /** Remove the drift (the wall back at the tour's own framing); `smooth`: over a second instead of at once. */
+  function stopOledDrift(smooth) {
+    if (!oledDrift) return;
+    var stage = document.getElementById("wall-stage");
+    var from = stage && smooth ? getComputedStyle(stage).transform : "";
+    if (oledDrift.scaleIn) oledDrift.scaleIn.cancel();
+    oledDrift = null;
+    pausedIndicator.style.transform = "";
+    if (!stage) return;
+    stage.style.transform = "";
+    if (from && from !== "none") {
+      stage.animate([{ transform: from }, { transform: "none" }], { duration: OLED_DRIFT_RETURN_MS, easing: "ease-out" });
+    }
+  }
+
+  /** A test-only freeze (SEEK with pause: true) plays on by itself after DEBUG_FREEZE_RELEASE_MS; a new SEEK restarts it. */
+  function armDebugFreeze() {
+    clearTimeout(debugFreezeTimer);
+    debugFrozenSince = Date.now();
+    debugFreezeTimer = setTimeout(releaseDebugFreeze, Idle.DEBUG_FREEZE_RELEASE_MS);
+  }
+
+  /** A real PAUSE / RESUME, a SEEK that plays, or a new list or wall takes over from a test freeze. */
+  function clearDebugFreeze() {
+    clearTimeout(debugFreezeTimer);
+    debugFreezeTimer = null;
+    debugFrozenSince = null;
+  }
+
+  function releaseDebugFreeze() {
+    var now = Date.now();
+    if (debugFrozenSince == null) return;
+    if (!Idle.debugFreezeReleaseDue({ now: now, frozenSince: debugFrozenSince })) {
+      debugFreezeTimer = setTimeout(releaseDebugFreeze, debugFrozenSince + Idle.DEBUG_FREEZE_RELEASE_MS - now);
+      return;
+    }
+    clearDebugFreeze();
+    console.log("[KULTURA] test freeze released after " + Idle.DEBUG_FREEZE_RELEASE_MS / 60000 + " min");
+    if (isPaused) setPaused(false);
+  }
+
+  /** STATUS.debug.oled: the drift, and when the paused stop, the drift and a test freeze are due (ms from now). */
+  function oledDiagnostics() {
+    var now = Date.now();
+    var stillSince = wallStillClock();
+    return {
+      driftActive: oledDrift != null,
+      driftMs: oledDrift ? now - oledDrift.startedAt : null,
+      driftScalingIn: !!(oledDrift && oledDrift.scaleIn),
+      driftOffsetPx: oledDrift ? { x: oledDrift.x, y: oledDrift.y } : null,
+      driftStartsInMs: !oledDrift && stillSince != null ? Math.max(0, stillSince + Idle.OLED_DRIFT_START_MS - now) : null,
+      pausedStopInMs: isPaused && pausedSince != null ? Math.max(0, pausedSince + Idle.pausedStopMs(mode) - now) : null,
+      debugFreezeReleaseInMs: debugFrozenSince != null ? Math.max(0, debugFrozenSince + Idle.DEBUG_FREEZE_RELEASE_MS - now) : null,
+    };
   }
 
   /**
@@ -861,6 +997,7 @@
         sourceName = playlist.sourceName;
         if (result.restart) {
           if (command.secondsPerArtwork) secondsPerArtwork = command.secondsPerArtwork;
+          clearDebugFreeze();
           isPaused = false;
           pausedSince = null;
           nothingToShowSince = null;
@@ -897,9 +1034,11 @@
         }
         break;
       case "PAUSE":
+        clearDebugFreeze();
         setPaused(true);
         break;
       case "RESUME":
+        clearDebugFreeze();
         setPaused(false);
         break;
       case "GET_STATUS":
@@ -919,14 +1058,23 @@
       case "SEEK":
         // Test-only (tv_capture.py): jump the slide (wall mode: the stop) on screen to an exact time.
         if (!debugMode) return;
+        // A freeze releases itself after 3 minutes (idle.js DEBUG_FREEZE_RELEASE_MS); each SEEK restarts that clock.
         if (mode === "wall") {
           if (!wallState || !wallState.started) return;
+          if (command.pause) armDebugFreeze();
+          else clearDebugFreeze();
           wallView.seek(command.timeMs);
+          if (command.pause) wallStillSince = Date.now(); // an exact test frame: no drift for a minute
           if (command.pause !== isPaused) setPaused(command.pause);
-          else sendStatus();
+          else {
+            syncOledDrift();
+            sendStatus();
+          }
           return;
         }
         if (!slideAnimations) return;
+        if (command.pause) armDebugFreeze();
+        else clearDebugFreeze();
         resetAnimationWatchdog();
         slideAnimations.clock.currentTime = command.timeMs;
         slideAnimations.caption.currentTime = command.timeMs;
@@ -970,6 +1118,9 @@
   function leaveWall() {
     clearTimeout(wallAssemblyTimer);
     wallAssemblyTimer = null;
+    stopOledDrift(false);
+    clearTimeout(oledDriftTimer);
+    oledDriftTimer = null;
     if (wallView) wallView.destroy();
     wallState = null;
     mode = "slideshow";
@@ -993,6 +1144,9 @@
         idleScreen.classList.add("hidden");
         requestWakeLock();
         renderPausedIndicator();
+        // Paused while the pieces arrived: the wall is first still from now.
+        if (isPaused) wallStillSince = Date.now();
+        syncOledDrift();
         sendStatus();
       },
     });
@@ -1016,6 +1170,7 @@
       built: false,
     };
     addWallPieces(command.pieces);
+    clearDebugFreeze();
     isPaused = false;
     pausedSince = null;
     nothingToShowSince = null;
@@ -1090,7 +1245,7 @@
     handleMessage({ type: action });
   });
 
-  // ─── Auto-stop (idle.js: 5 min with nothing to show, 20 min paused, 3 h unattended) ───
+  // ─── Auto-stop (idle.js: 5 min with nothing to show, 20 min paused (a wall: 10 min), 3 h unattended) ───
   setInterval(function () {
     if (autoStoppedReason) return;
     var reason = Idle.autoStopReason({
@@ -1098,6 +1253,7 @@
       nothingToShowSince: nothingToShowSince,
       pausedSince: isPaused ? pausedSince : null,
       lastActivity: lastActivity,
+      mode: mode,
     });
     if (!reason) return;
     autoStoppedReason = reason;
@@ -1218,6 +1374,7 @@
         pausedIndicator: pausedIndicator.classList.contains("hidden") ? null : pausedIndicator.textContent.replace(/\s+/g, " ").trim(),
         pausedTextFaded: pausedIndicator.classList.contains("quiet"),
         autoStoppedReason: autoStoppedReason,
+        oled: oledDiagnostics(),
         progress: slideAnimations ? slideAnimations.clock.currentTime / slideDurationMs() : null,
       };
     },

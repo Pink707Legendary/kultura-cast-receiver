@@ -17,6 +17,7 @@
   "use strict";
 
   var Tour = root.KulturaWallTour;
+  var Render = root.KulturaWallRender;
 
   /** After the wall is built, wait at most this long for the first views' wall images before the tour starts. */
   var WALL_READY_WAIT_MS = 6000;
@@ -107,7 +108,7 @@
     var closeUpDropped = false;
     var stopIndex = 0;
     var anims = null; // { clock, caption, title, light, detail, move, timer }
-    var pieceEls = []; // per piece index: { img, src (url while loaded) }
+    var pieceEls = []; // per piece index: { node, frame, img, src (url while loaded), lod, layer }
     var imagePlan = { pieceIndexes: [], estimatedBytes: 0, wanted: 0 };
     /** Detail images by tour position: { position, img, state, natural, url, fallbackUsed, wrapper }. */
     var details = {};
@@ -116,9 +117,19 @@
     var readyTimer = null;
     /** The segment whose views the wall images were last planned for. */
     var plannedSegment = null;
+    /** The segment the layers, frame levels and detail placement were last updated for. */
+    var renderSegment = null;
     var lastError = null;
     /** Test-only render switches (protocol.js RENDER_FLAG_SPEC; {} = the normal look). */
     var renderFlags = {};
+    /** Shadow images made for this wall (wallrender.js), by kind and size: { url }. */
+    var shadowImages = {};
+    /** Shadows fell back to live CSS blurs for this wall (no 2D canvas). */
+    var shadowsLive = false;
+    /** Moulding textures of every level for this wall's frames, held so a level switch never draws an empty band. */
+    var lodPreload = [];
+    /** The still view the layers and frame levels were last planned for (diagnostics). */
+    var renderPlan = { layers: 0, lods: {}, plannedAtMs: null, views: 0 };
 
     // ─── Building the wall ───
 
@@ -147,11 +158,13 @@
         covering.style.backgroundSize = px(tile * res) + " " + px(tile * res);
         covering.style.backgroundPosition = px(((overscan - b.minX) * L % tile) * res) + " " + px(((overscan - b.minY) * L % tile) * res);
         covering.style.transformOrigin = "0 0";
-        covering.style.transform = "scale(" + (1 / res).toFixed(5) + ")" + (renderFlags.coveringLayer ? " translateZ(0)" : "");
+        covering.style.transform = "scale(" + (1 / res).toFixed(5) + ")" + (renderFlags.coveringLayer === false ? "" : " translateZ(0)");
       } else {
-        covering.style.transform = renderFlags.coveringLayer ? "translateZ(0)" : "";
+        // Its own layer (default): a painting layer re-rastering never re-rasters the wallpaper under it.
+        covering.style.transform = renderFlags.coveringLayer === false ? "" : "translateZ(0)";
       }
       piecesLayer.textContent = "";
+      var uPx = L * WEBSITE_PX_PT;
       // The phone draws by artwork id, later on top: same here for overlapping Free-wall pieces.
       var byId = tour.pieces.slice().sort(function (a, c) { return a.id - c.id; });
       pieceEls = [];
@@ -163,7 +176,8 @@
         node.style.width = px(p.w * L);
         node.style.height = px(p.h * L);
         node.style.setProperty("--band", px(p.drawnBand * L));
-        el("div", "wp-shadow", node);
+        var shadow = el("div", "wp-shadow", node);
+        applyShadow(shadow, p.frame === "canvas" ? "canvas" : "frame", p.w / WEBSITE_PX_PT, p.h / WEBSITE_PX_PT, uPx);
         var canvas = el("div", "wp-canvas", node);
         canvas.style.left = px((p.inner.x - p.x) * L);
         canvas.style.top = px((p.inner.y - p.y) * L);
@@ -173,20 +187,196 @@
         var img = el("img", null, canvas);
         img.alt = "";
         img.decoding = "async";
-        el("div", "wp-lip", canvas);
+        var lip = el("div", "wp-lip", canvas);
+        applyShadow(lip, Render.lipKind(p.frame), p.inner.w / WEBSITE_PX_PT, p.inner.h / WEBSITE_PX_PT, uPx);
         var frame = el("div", "wp-frame", node);
         frame.setAttribute("data-frame", p.frame);
         if (p.frame === "canvas") {
           var side = mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE);
           frame.style.borderColor = side + " " + side + " " + mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE * 0.67);
         }
-        pieceEls[p.index] = { img: img, src: null };
+        pieceEls[p.index] = { node: node, frame: frame, img: img, src: null, lod: null, layer: false };
         img.onerror = function () {
           // Main colour stays; the tour goes on.
           img.removeAttribute("src");
           lastError = "wall image " + p.id + " failed";
         };
       });
+    }
+
+    /** A data URL of shadow `kind` for a box of boxW x boxH u at pxPerU (made once per wall and size). */
+    function shadowUrl(kind, boxW, boxH, pxPerU) {
+      var key = kind + ":" + boxW + "x" + boxH + "@" + pxPerU;
+      if (shadowImages[key]) return shadowImages[key].url;
+      var image = Render.shadowImage(kind, boxW, boxH, pxPerU);
+      var canvasEl = document.createElement("canvas");
+      canvasEl.width = image.width;
+      canvasEl.height = image.height;
+      var ctx = null;
+      try {
+        ctx = canvasEl.getContext("2d");
+      } catch (e) {
+        ctx = null;
+      }
+      if (!ctx) return null; // no 2D canvas: applyShadow falls back to the CSS blurs
+      var data = ctx.createImageData(image.width, image.height);
+      for (var i = 0; i < image.alpha.length; i++) data.data[i * 4 + 3] = image.alpha[i];
+      ctx.putImageData(data, 0, 0);
+      var url = canvasEl.toDataURL("image/png");
+      canvasEl.width = 0; // let the canvas memory go now
+      shadowImages[key] = { url: url };
+      return url;
+    }
+
+    /**
+     * Draw shadow `kind` (wallrender.js SHADOW_SPECS) on `node`, whose box is boxW x boxH u (one u = uPx CSS px):
+     * the element grows by the shadow's outset and draws the image in its border (nine slices of one shared image)
+     * or as its background (an image of this size, for boxes too small for nine slices). Lips have no outset.
+     */
+    function applyShadow(node, kind, boxW, boxH, uPx) {
+      if (shadowsLive) return;
+      var o = Render.shadowOutset(kind);
+      var inset = Render.SHADOW_SPECS[kind].inset;
+      node.style.boxSizing = "border-box";
+      node.style.left = px(-o.left * uPx);
+      node.style.top = px(-o.top * uPx);
+      node.style.width = px((boxW + o.left + o.right) * uPx);
+      node.style.height = px((boxH + o.top + o.bottom) * uPx);
+      var plan = Render.shadowPlan(kind, boxW, boxH);
+      if (plan.mode === "nine") {
+        var ppu = inset ? Render.PX_PER_U.inset : Render.PX_PER_U.outer;
+        var sides = [o.top, o.right, o.bottom, o.left].map(function (v) { return v + plan.corner; });
+        var nine = shadowUrl(kind, plan.refBox, plan.refBox, ppu);
+        if (!nine) return useLiveShadows(node);
+        node.style.borderWidth = sides.map(function (v) { return px(v * uPx); }).join(" ");
+        node.style.borderImage = "url(" + nine + ") " +
+          sides.map(function (v) { return v * ppu; }).join(" ") + " stretch";
+      } else {
+        // One image of this size (boxes rounded to whole u: shared by same-sized pieces, error under half a u).
+        var each = inset ? Render.PX_PER_U.inset : Render.PX_PER_U.outerPerPiece;
+        var own = shadowUrl(kind, Math.max(1, Math.round(boxW)), Math.max(1, Math.round(boxH)), each);
+        if (!own) return useLiveShadows(node);
+        node.style.backgroundImage = "url(" + own + ")";
+        node.style.backgroundSize = "100% 100%";
+      }
+    }
+
+    /** No 2D canvas on this device: the whole wall keeps the CSS blurs (the element back to its box). */
+    function useLiveShadows(node) {
+      shadowsLive = true;
+      stage.classList.add("rf-css-shadows");
+      node.removeAttribute("style");
+    }
+
+    /** Load every level of the moulding textures this wall uses (a switch then never shows an empty band). */
+    function preloadFrameLevels() {
+      lodPreload = [];
+      var seen = {};
+      var probe = el("div", "wp-frame");
+      probe.style.display = "none";
+      piecesLayer.appendChild(probe);
+      tour.pieces.forEach(function (p) {
+        if (seen[p.frame] || !Render.FRAME_SLICE_PCT[p.frame]) return;
+        seen[p.frame] = true;
+        probe.setAttribute("data-frame", p.frame);
+        Render.FRAME_LOD_LEVELS.forEach(function (level) {
+          if (level === 900) probe.removeAttribute("data-lod");
+          else probe.setAttribute("data-lod", String(level));
+          var m = /url\(["']?([^"')]+)["']?\)/.exec(getComputedStyle(probe).borderImageSource || "");
+          if (!m) return;
+          var img = new Image();
+          img.src = m[1];
+          if (img.decode) img.decode().catch(function () {});
+          lodPreload.push(img);
+        });
+      });
+      piecesLayer.removeChild(probe);
+    }
+
+    // ─── Layers and frame levels (planned while the camera is still) ───
+
+    /**
+     * The camera views from stop time `t` to the end of the next move: { now, next (where the camera will rest
+     * next), path (cameras along that move) }. After the stop's last move, the next stop's first move (planned as
+     * the tour will plan it when this stop ends).
+     */
+    function upcomingViews(t) {
+      var now = Tour.cameraAt(stop, tour, t);
+      var move = null;
+      for (var i = 0; i < stop.segments.length; i++) {
+        var seg = stop.segments[i];
+        if (seg.move && seg.endMs > t + 1) {
+          move = seg;
+          break;
+        }
+      }
+      if (!move && tour.order.length > 1) {
+        var nextIndex = (stopIndex + 1) % tour.order.length;
+        var slot = details[nextIndex];
+        var next = Tour.planStop(tour, nextIndex, {
+          from: tour.stops[stopIndex], flow: "auto", seconds: settings.seconds, motion: settings.motion,
+          natural: slot && slot.state === "ready" ? slot.natural : null,
+        });
+        for (var j = 0; j < next.segments.length; j++) {
+          if (next.segments[j].move) {
+            move = next.segments[j];
+            break;
+          }
+        }
+      }
+      return { now: now, next: move ? move.to : now, path: move ? move.path || [] : [] };
+    }
+
+    /**
+     * Give the paintings near the camera's coming path their own layer (and take it from the others), and pick
+     * each visible frame's moulding level. Called while the camera is still (layer and texture changes re-raster).
+     */
+    function planRender(t) {
+      if (!tour || !stop) return;
+      var views = upcomingViews(t);
+      var mode = renderFlags.pieceLayers || "near";
+      var want = {};
+      if (mode === "all") {
+        tour.pieces.forEach(function (p) { want[p.index] = true; });
+      } else if (mode === "near") {
+        var list = [views.now, views.next].concat(views.path);
+        var cap = renderFlags.maxPieceLayers != null ? renderFlags.maxPieceLayers : Render.MAX_PIECE_LAYERS;
+        Render.pieceLayerPlan(tour.pieces, list, tour.screen, tour.layoutScale, cap).forEach(function (i) { want[i] = true; });
+      }
+      var layers = 0;
+      pieceEls.forEach(function (entry, i) {
+        var on = !!want[i];
+        if (on !== entry.layer) {
+          entry.layer = on;
+          entry.node.classList.toggle("wp-layer", on);
+        }
+        if (on) layers++;
+      });
+      var fixed = renderFlags.frameTex && renderFlags.frameTex !== "auto" ? Number(renderFlags.frameTex) : null;
+      var counts = {};
+      tour.pieces.forEach(function (p) {
+        var entry = pieceEls[p.index];
+        var level = entry.lod;
+        if (fixed) {
+          level = fixed;
+        } else {
+          var seenNow = Render.viewShows(views.now, p, tour.screen, 0.1);
+          var seenNext = Render.viewShows(views.next, p, tour.screen, 0.1);
+          if (seenNow || seenNext) {
+            var band = p.drawnBand * tour.dpr;
+            var bandNow = band * (seenNow ? views.now.zoom : views.next.zoom);
+            var bandNext = seenNext ? band * views.next.zoom : 0;
+            level = Render.frameLod(p.frame, bandNow, bandNext, entry.lod);
+          }
+        }
+        if (level && level !== entry.lod) {
+          entry.lod = level;
+          if (level === 900) entry.frame.removeAttribute("data-lod");
+          else entry.frame.setAttribute("data-lod", String(level));
+        }
+        if (entry.lod) counts[entry.lod] = (counts[entry.lod] || 0) + 1;
+      });
+      renderPlan = { layers: layers, lods: counts, plannedAtMs: Math.round(t), views: 2 + views.path.length };
     }
 
     /**
@@ -287,7 +477,9 @@
         else releaseDetail(details[k]);
       });
       var current = detailFor(position);
-      if (!fadingOther) detailFor(next);
+      // Default: the next stop's image is fetched and decoded during this stop's hold (sync), never while the
+      // camera moves. detailTiming "early" (test-only): at once, as before 2.9.0's rendering fixes.
+      if (!fadingOther && (renderFlags.detailTiming === "early" || details[next])) detailFor(next);
       return current;
     }
 
@@ -299,10 +491,10 @@
       var box = slot.wrapper;
       box.style.left = px(piece.inner.x * L);
       box.style.top = px(piece.inner.y * L);
-      // Test-only (detailRes): laid out at the image's own pixel size and scaled down to the painting, so the
-      // layer may be rastered at the image's resolution while the camera moves (Chrome caps an animated layer's
-      // raster at ~1920 x 1920 of its own layout pixels).
-      var res = renderFlags.detailRes && slot.natural ? Math.max(1, slot.natural.width / (piece.inner.w * L)) : 1;
+      // Laid out at the image's own pixel size and scaled down to the painting, so the layer is rastered at the
+      // image's resolution while the camera moves (Chrome caps an animated layer's raster at ~1920 x 1920 of its
+      // own layout pixels). RENDER_FLAGS detailRes false: at the painting's size, as before.
+      var res = renderFlags.detailRes !== false && slot.natural ? Math.max(1, slot.natural.width / (piece.inner.w * L)) : 1;
       box.style.width = px(piece.inner.w * L * res);
       box.style.height = px(piece.inner.h * L * res);
       box.style.transformOrigin = "0 0";
@@ -315,10 +507,21 @@
       return !!slot && slot.state === "ready" && !!slot.wrapper && slot.wrapper.parentNode === detailLayer;
     }
 
+    /**
+     * Place the detail image only once the camera rests at its painting (default): placing it earlier rasters and
+     * uploads the large image while the camera glides (a stutter at the move's start). detailTiming "early" places it
+     * at once, as before.
+     */
+    function mayPlaceDetail(t) {
+      if (renderFlags.detailTiming === "early") return true;
+      return !!stop && t >= stop.arrivalMs - 1 && !Tour.segmentAt(stop, t).move;
+    }
+
     /** A detail image finished loading: show it if its stop is on screen (re-planning the close-up if needed). */
     function detailArrived(slot) {
       if (!stop || slot.position !== stopIndex) return;
       var t = clockTime();
+      if (!mayPlaceDetail(t)) return; // sync places it when the camera rests
       var approach = segmentNamed("approach");
       var planned = stop.natural;
       var differs = !planned || planned.width !== slot.natural.width || planned.height !== slot.natural.height;
@@ -391,8 +594,8 @@
         if (slot.position !== stopIndex && slot.position !== (stopIndex + 1) % tour.order.length) releaseDetail(slot);
         else if (slot.wrapper) slot.wrapper.style.opacity = "";
         fade.cancel();
-        // The next stop's image waited for this one to go (manageDetails).
-        detailFor((stopIndex + 1) % tour.order.length);
+        // The next stop's image waited for this one to go (manageDetails; by default sync asks at the hold).
+        if (renderFlags.detailTiming === "early") detailFor((stopIndex + 1) % tour.order.length);
       };
       return opacity;
     }
@@ -437,8 +640,9 @@
       };
       pauseAtArrival = paused && flow === "jump";
       rebuildWindows(0);
-      if (slot.state === "ready") attachDetailToStop(slot, 0);
+      if (slot.state === "ready" && mayPlaceDetail(0)) attachDetailToStop(slot, 0);
       if (frozen()) pauseAll();
+      renderSegment = null;
       sync();
       options.onStop();
     }
@@ -505,6 +709,24 @@
         plannedSegment = seg;
         applyImagePlan(stop, seg.startMs);
       }
+      if (seg !== renderSegment) {
+        renderSegment = seg;
+        // Layers and frame levels change only while the camera rests (or as a stop starts: a NEXT / PREVIOUS jump,
+        // the first stop; for the tour moving on, the plan made during the last stop's release still holds).
+        if (!seg.move || seg.startMs === 0) planRender(seg.move ? t : Math.max(t, seg.startMs));
+        if (!seg.move && t >= stop.arrivalMs - 1) {
+          var here = details[stopIndex];
+          if (here && here.state === "ready" && !detailShown(here)) {
+            var tAttach = clockTime();
+            if (renderFlags.detailTiming !== "early") attachDetailToStop(here, tAttach);
+          }
+          // The next stop's image: fetched and decoded while the camera holds still (the 2-image cap holds).
+          if ((seg.name === "hold" || seg.name === "release") && tour.order.length > 1) {
+            var nextPos = (stopIndex + 1) % tour.order.length;
+            if (!details[nextPos] && !fadingSlot) detailFor(nextPos);
+          }
+        }
+      }
       var still = frozen();
       if (!seg.move) {
         if (anims.move) {
@@ -554,9 +776,8 @@
         "rf-no-wall-images": renderFlags.wallImages === false,
         "rf-no-light": renderFlags.light === false,
         "rf-no-glass": renderFlags.glass === false,
-        "rf-piece-layers": renderFlags.pieceLayers === true,
-        "rf-frametex-450": renderFlags.frameTex === "450",
-        "rf-frametex-300": renderFlags.frameTex === "300",
+        "rf-css-shadows": renderFlags.shadowStyle === "css" || shadowsLive,
+        "rf-layer-will-change": renderFlags.layerHint === "willChange",
       };
       for (var name in classes) stage.classList.toggle(name, classes[name]);
       camera.style.willChange = renderFlags.willChange ? "transform" : "";
@@ -570,6 +791,7 @@
       settings = { seconds: initialSettings.seconds, motion: initialSettings.motion };
       tour = Tour.planTour(wall, view, dpr);
       buildWall();
+      preloadFrameLevels();
       stopIndex = 0;
       stop = null;
       camera.style.transform = Tour.cameraTransform(tour.opening, tour);
@@ -612,6 +834,12 @@
       pieceEls = [];
       piecesLayer.textContent = "";
       detailLayer.textContent = "";
+      shadowImages = {};
+      shadowsLive = false;
+      stage.classList.toggle("rf-css-shadows", renderFlags.shadowStyle === "css");
+      lodPreload = [];
+      renderSegment = null;
+      renderPlan = { layers: 0, lods: {}, plannedAtMs: null, views: 0 };
       stage.classList.add("hidden");
       tour = null;
       stop = null;
@@ -703,6 +931,8 @@
         },
         lastError: lastError,
         renderFlags: renderFlags,
+        // Paintings with their own layer now, and how many frames use each moulding level (wallrender.js).
+        render: renderPlan,
       };
     }
 

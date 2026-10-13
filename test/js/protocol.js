@@ -46,11 +46,17 @@
     glass: "boolean", // the blurred glass (backdrop-filter) of the wall caption and title
     willChange: "boolean", // will-change: transform on the camera
     overscanPt: [0, 20000], // how far the covering runs beyond the paintings (wall points); applied at the next wall
-    pieceLayers: "boolean", // each piece its own composited layer (raster scale not clamped by the whole wall's size)
+    // The rendering fixes of 2.9.0 (wallrender.js), each on by default; these switch one off for A/B on the TV:
+    shadowStyle: ["baked", "css"], // shadows and lips from computed images (default) or the original CSS blurs
+    pieceLayers: ["near", "all", "off"], // own composited layers for paintings near the camera path / every one / none
+    layerHint: ["translateZ", "willChange"], // how a painting layer is made (will-change keeps its largest raster)
+    maxPieceLayers: [0, 300], // cap on painting layers (default wallrender.js MAX_PIECE_LAYERS)
+    frameTex: ["auto", "900", "450", "300", "150"], // moulding level of detail picked per frame (auto) or one size
+    detailRes: "boolean", // false: the detail image laid out at the painting's size (blurrier while moving)
+    detailTiming: ["still", "early"], // the detail image placed and the next one fetched while still, or as before
+    coveringLayer: "boolean", // false: the covering painted into the wall's layer
+    coveringTile: ["seamless", "original"], // the seamless covering tiles (+ macro variation) or the website's
     coveringRes: [1, 8], // the covering laid out this many times larger and scaled back down (sharper while moving)
-    coveringLayer: "boolean", // the covering its own composited layer
-    frameTex: ["900", "450", "300"], // moulding texture size (900 = the website's; smaller = pre-filtered, less shimmer)
-    detailRes: "boolean", // the detail image laid out at its own pixel size, scaled down to the painting (sharp approach)
   };
 
   function readRenderFlags(flags) {

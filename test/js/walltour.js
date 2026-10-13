@@ -6,7 +6,8 @@
  *
  * The tour (wall mode): it opens on the whole wall, then visits the paintings in reading order (rows top to
  * bottom, left to right). Each visit is one STOP: the camera glides to the painting until it fills about 62 % of
- * the screen with its frame and the edges of its neighbours in view, the large (detail) image cross-fades in
+ * the screen, composed so that each neighbour shows as a glimpse (its frame and a little of its painting) or not
+ * at all, never as a sliver (composeStopCamera), the large (detail) image cross-fades in
  * over it, then (motion "gentle") one slow move into its detail (the slideshow's choice of subject and its
  * sharpness limits, motion.js; deeper and a little quicker than the slideshow, see CLOSE_UP_COMPOSITION_CAP), a hold with the label, a pull back, and the detail image fades out
  * before the camera leaves. At a change of row the camera first pulls back to show that stretch of wall; after
@@ -33,6 +34,50 @@
   // ─── Framing ───
   /** At a stop the painting (frame included) fills this share of the screen's height or width, whichever binds. */
   var STOP_SCREEN_SHARE = 0.62;
+
+  // ─── Stop composition (Yarden, 2026-10-13: "a glimpse of each neighbour") ───
+  // At a stop the painting sits in the middle and the camera deliberately shows a GLIMPSE of each neighbour: left
+  // and right in its row, above and below (the nearest painting overlapping it horizontally in the row above /
+  // below). A glimpse = the neighbour's frame on its near edge plus GLIMPSE_MIN_SHARE..GLIMPSE_MAX_SHARE of its
+  // painting. composeStopCamera searches a small grid of zooms and offsets for the camera that comes closest.
+  /** The painting's binding share of the screen may range this far around STOP_SCREEN_SHARE to catch glimpses. */
+  var STOP_SHARE_MIN = 0.52;
+  var STOP_SHARE_MAX = 0.7;
+  /** ...and the painting may sit off centre by up to this share of the screen (per axis) to balance them. */
+  var STOP_MAX_OFFSET_SHARE = 0.08;
+  /** The painting's frame keeps at least this share of the screen clear of the screen's edge. */
+  var STOP_MIN_EDGE_SHARE = 0.04;
+  /** A glimpse shows this share of the neighbour's painting (inside its frame): enough to recognise it. */
+  var GLIMPSE_MIN_SHARE = 0.1;
+  var GLIMPSE_MAX_SHARE = 0.2;
+  /**
+   * Less than this share of a neighbour's painting, or fewer CSS px than GLIMPSE_MIN_PX, or only part of its
+   * frame, is a SLIVER: it reads as an accident. A neighbour that cannot be glimpsed is better left out.
+   */
+  var SLIVER_SHARE = 0.05;
+  var GLIMPSE_MIN_PX = 40;
+  /** Costs (the search minimises their sum): a sliver is worse than a neighbour left out of view. */
+  var GLIMPSE_SLIVER_COST = 3;
+  var GLIMPSE_MISSING_COST = 1;
+  /** Any other painting peeking in as a sliver (a strip of frame at the screen's edge) costs this much. */
+  var OTHER_SLIVER_COST = 2;
+  /**
+   * Showing more than GLIMPSE_MAX_SHARE costs GLIMPSE_EXCESS_LINEAR_COST per GLIMPSE_MAX_SHARE of excess plus
+   * GLIMPSE_EXCESS_COST times its square (all of a painting: 0.6 + 0.48, about a neighbour left out). The square balances two neighbours shown
+   * too much rather than one shown whole and the other barely (the accidental look the owner described).
+   */
+  var GLIMPSE_EXCESS_COST = 0.03;
+  var GLIMPSE_EXCESS_LINEAR_COST = 0.15;
+  /** Leaving STOP_SCREEN_SHARE (to the range's end) and the centre (to STOP_MAX_OFFSET_SHARE) cost this much. */
+  var STOP_ZOOM_COST = 0.3;
+  var STOP_OFFSET_COST = 0.3;
+  /**
+   * Search grid: zoom steps across the share range (1 % of the screen apart), offset steps across
+   * +-STOP_MAX_OFFSET_SHARE (per axis, 2/3 % of the screen apart, ~6 px): fine enough to look deliberate, ~0.1 ms
+   * per stop on a desktop.
+   */
+  var STOP_ZOOM_STEPS = 19;
+  var STOP_OFFSET_STEPS = 25;
   /** Opening shot: the paintings' bounding box plus this share of its size on every side fits the screen. */
   var OVERVIEW_MARGIN = 0.06;
   /**
@@ -263,13 +308,211 @@
     };
   }
 
-  /** The stop shot: the painting centred, filling STOP_SCREEN_SHARE of the binding screen side. */
+  /**
+   * The plain stop shot: the painting centred, filling STOP_SCREEN_SHARE of the binding screen side (without
+   * neighbours, composeStopCamera returns exactly this).
+   */
   function stopCamera(piece, screen) {
     return {
       cx: piece.x + piece.w / 2,
       cy: piece.y + piece.h / 2,
       zoom: STOP_SCREEN_SHARE * Math.min(screen.width / piece.w, screen.height / piece.h),
     };
+  }
+
+  /** The painting's box inside its frame: the piece's `inner` when planTour made one, else from its band. */
+  function paintingBox(p) {
+    return p.inner || innerBox(p, p.drawnBand != null ? p.drawnBand : p.band || 0);
+  }
+
+  /**
+   * How much of neighbour `n` on `side` ("left" | "right" | "above" | "below") of the stop camera `cam` shows:
+   * { kind, share, px } where share is the part of its painting in view (along the axis towards it), px that
+   * part in CSS px, and kind "none" (out of view), "sliver" (only part of its frame, or under SLIVER_SHARE /
+   * GLIMPSE_MIN_PX of its painting, unless all of a small painting shows), "glimpse" (frame and GLIMPSE_MIN_SHARE..GLIMPSE_MAX_SHARE), "small"
+   * (frame and a little less), or "wide" (more than a glimpse).
+   */
+  function glimpseOf(cam, n, side, screen) {
+    var inner = paintingBox(n);
+    var halfW = screen.width / 2 / cam.zoom;
+    var halfH = screen.height / 2 / cam.zoom;
+    var outerNear;
+    var innerNear;
+    var seen;
+    var size;
+    if (side === "right") {
+      outerNear = n.x;
+      innerNear = inner.x;
+      seen = cam.cx + halfW - innerNear;
+      size = inner.w;
+      if (cam.cx + halfW <= outerNear) return { kind: "none", share: 0, px: 0 };
+    } else if (side === "left") {
+      outerNear = n.x + n.w;
+      innerNear = inner.x + inner.w;
+      seen = innerNear - (cam.cx - halfW);
+      size = inner.w;
+      if (cam.cx - halfW >= outerNear) return { kind: "none", share: 0, px: 0 };
+    } else if (side === "below") {
+      outerNear = n.y;
+      innerNear = inner.y;
+      seen = cam.cy + halfH - innerNear;
+      size = inner.h;
+      if (cam.cy + halfH <= outerNear) return { kind: "none", share: 0, px: 0 };
+    } else {
+      outerNear = n.y + n.h;
+      innerNear = inner.y + inner.h;
+      seen = innerNear - (cam.cy - halfH);
+      size = inner.h;
+      if (cam.cy - halfH >= outerNear) return { kind: "none", share: 0, px: 0 };
+    }
+    var share = clamp(seen / Math.max(size, 1e-6), 0, 1);
+    var px = clamp(seen, 0, size) * cam.zoom;
+    var kind;
+    if (seen <= 0 || (share < 1 && (share < SLIVER_SHARE || px < GLIMPSE_MIN_PX))) kind = "sliver";
+    else if (share < GLIMPSE_MIN_SHARE) kind = "small";
+    else if (share <= GLIMPSE_MAX_SHARE) kind = "glimpse";
+    else kind = "wide";
+    return { kind: kind, share: share, px: px };
+  }
+
+  /** Cost of one neighbour's glimpse (0 on target; see the GLIMPSE_* constants). */
+  function glimpseCost(g) {
+    if (g.kind === "none") return GLIMPSE_MISSING_COST;
+    if (g.kind === "sliver") return GLIMPSE_SLIVER_COST;
+    if (g.kind === "small") return (0.5 * (GLIMPSE_MIN_SHARE - g.share)) / (GLIMPSE_MIN_SHARE - SLIVER_SHARE);
+    if (g.kind === "wide") {
+      var excess = (g.share - GLIMPSE_MAX_SHARE) / GLIMPSE_MAX_SHARE;
+      return GLIMPSE_EXCESS_LINEAR_COST * excess + GLIMPSE_EXCESS_COST * excess * excess;
+    }
+    return 0;
+  }
+
+  /**
+   * Neighbours of every piece: { left, right, above, below } (piece indices or null). Left and right: the next
+   * painting in its row; above and below: in the row above / below, the painting overlapping it horizontally
+   * whose centre is nearest its centre (none overlapping: none).
+   */
+  function stopNeighbours(pieces, reading) {
+    var rows = [];
+    reading.order.forEach(function (pieceIndex, position) {
+      var r = reading.rowOf[position];
+      (rows[r] = rows[r] || []).push(pieceIndex);
+    });
+    var result = [];
+    function nearestOverlapping(p, row) {
+      if (!row) return null;
+      var best = null;
+      var bestDistance = Infinity;
+      var centre = p.x + p.w / 2;
+      row.forEach(function (j) {
+        var q = pieces[j];
+        if (Math.min(p.x + p.w, q.x + q.w) - Math.max(p.x, q.x) <= 0) return;
+        var d = Math.abs(q.x + q.w / 2 - centre);
+        if (d < bestDistance) {
+          best = j;
+          bestDistance = d;
+        }
+      });
+      return best;
+    }
+    rows.forEach(function (row, r) {
+      row.forEach(function (pieceIndex, k) {
+        var p = pieces[pieceIndex];
+        result[pieceIndex] = {
+          left: k > 0 ? row[k - 1] : null,
+          right: k < row.length - 1 ? row[k + 1] : null,
+          above: nearestOverlapping(p, rows[r - 1]),
+          below: nearestOverlapping(p, rows[r + 1]),
+        };
+      });
+    });
+    return result;
+  }
+
+  /**
+   * The composed stop shot (Yarden, 2026-10-13): the painting near the middle, filling STOP_SHARE_MIN..
+   * STOP_SHARE_MAX of the binding screen side, its frame clear of the screen's edge, placed (off centre by at most
+   * STOP_MAX_OFFSET_SHARE per axis) so that each neighbour in `neighbours` ({ left, right, above, below }: pieces
+   * or null) shows as a glimpse, or not at all rather than as a sliver; any other painting in `others` (the
+   * wall's pieces; the painting and its neighbours are skipped) that peeks in must not be a sliver either.
+   * Bounded grid search, deterministic. Costs per axis do not interact (a neighbour's glimpse depends on one
+   * axis only), so per zoom each axis is scored once and only the other paintings' slivers need the 2D grid.
+   */
+  function composeStopCamera(piece, neighbours, screen, others) {
+    var nb = neighbours || {};
+    var base = Math.min(screen.width / piece.w, screen.height / piece.h);
+    var pcx = piece.x + piece.w / 2;
+    var pcy = piece.y + piece.h / 2;
+    // Other paintings that the widest view (least zoom, largest offset) can reach.
+    var reachW = (screen.width * (0.5 + STOP_MAX_OFFSET_SHARE)) / (STOP_SHARE_MIN * base);
+    var reachH = (screen.height * (0.5 + STOP_MAX_OFFSET_SHARE)) / (STOP_SHARE_MIN * base);
+    var near = (others || []).filter(function (q) {
+      return q !== piece && q !== nb.left && q !== nb.right && q !== nb.above && q !== nb.below &&
+        q.x < pcx + reachW && q.x + q.w > pcx - reachW && q.y < pcy + reachH && q.y + q.h > pcy - reachH;
+    });
+    var best = null;
+    for (var i = 0; i < STOP_ZOOM_STEPS; i++) {
+      var share = STOP_SHARE_MIN + ((STOP_SHARE_MAX - STOP_SHARE_MIN) * i) / (STOP_ZOOM_STEPS - 1);
+      var zoom = share * base;
+      var zoomTerm = Math.log(share / STOP_SCREEN_SHARE) /
+        Math.log((share >= STOP_SCREEN_SHARE ? STOP_SHARE_MAX : STOP_SHARE_MIN) / STOP_SCREEN_SHARE);
+      var zoomCost = STOP_ZOOM_COST * zoomTerm * zoomTerm;
+      var xs = axisOptions(zoom, screen.width, pcx, piece.w, nb.left, "left", nb.right, "right", "x");
+      var ys = axisOptions(zoom, screen.height, pcy, piece.h, nb.above, "above", nb.below, "below", "y");
+      for (var j = 0; j < xs.length; j++) {
+        for (var k = 0; k < ys.length; k++) {
+          var cost = zoomCost + xs[j].cost + ys[k].cost;
+          if (best && cost >= best.cost - 1e-9) continue;
+          for (var m = 0; m < near.length; m++) {
+            var sx = xs[j].seen[m];
+            var sy = ys[k].seen[m];
+            // In view on both axes, and a sliver on either: an accidental strip of frame or painting.
+            if (sx !== "out" && sy !== "out" && (sx === "sliver" || sy === "sliver")) cost += OTHER_SLIVER_COST;
+          }
+          if (!best || cost < best.cost - 1e-9) best = { cost: cost, cam: { cx: xs[j].centre, cy: ys[k].centre, zoom: zoom } };
+        }
+      }
+    }
+    if (!best) return stopCamera(piece, screen);
+    return best.cam;
+
+    // One axis at one zoom: every allowed camera centre (wall points) with the cost of the offset and of the
+    // neighbours before and after the painting, and how each other painting shows along this axis.
+    function axisOptions(zoom, screenSize, centre, size, before, beforeSide, after, afterSide, axis) {
+      var options = [];
+      var half = screenSize / 2 / zoom;
+      for (var j = 0; j < STOP_OFFSET_STEPS; j++) {
+        var offset = STOP_MAX_OFFSET_SHARE * ((2 * j) / (STOP_OFFSET_STEPS - 1) - 1);
+        // The painting's centre sits `offset` screens from the screen's centre: the camera centre moves opposite.
+        var c = centre - (offset * screenSize) / zoom;
+        var edge = 0.5 - Math.abs(offset) - (size * zoom) / screenSize / 2;
+        if (edge < STOP_MIN_EDGE_SHARE - 1e-9) continue;
+        var cam = { cx: c, cy: c, zoom: zoom };
+        var axisScreen = { width: screenSize, height: screenSize };
+        var cost = STOP_OFFSET_COST * Math.pow(offset / STOP_MAX_OFFSET_SHARE, 2);
+        if (before) cost += glimpseCost(glimpseOf(cam, before, beforeSide, axisScreen));
+        if (after) cost += glimpseCost(glimpseOf(cam, after, afterSide, axisScreen));
+        var seen = near.map(function (q) { return extentSeen(q, axis, c - half, c + half, zoom); });
+        options.push({ cost: cost, centre: c, seen: seen });
+      }
+      return options;
+    }
+  }
+
+  /**
+   * How painting `q` shows along one axis ("x" or "y") of a view spanning lo..hi (wall points) at `zoom`: "out",
+   * "sliver" (only frame, or under SLIVER_SHARE / GLIMPSE_MIN_PX of its painting), or "ok".
+   */
+  function extentSeen(q, axis, lo, hi, zoom) {
+    var inner = paintingBox(q);
+    var o0 = axis === "x" ? q.x : q.y;
+    var o1 = o0 + (axis === "x" ? q.w : q.h);
+    if (o1 <= lo || o0 >= hi) return "out";
+    var i0 = axis === "x" ? inner.x : inner.y;
+    var size = axis === "x" ? inner.w : inner.h;
+    var seen = Math.min(hi, i0 + size) - Math.max(lo, i0);
+    if (seen >= size - 1e-9) return "ok";
+    return seen <= 0 || seen / size < SLIVER_SHARE || seen * zoom < GLIMPSE_MIN_PX ? "sliver" : "ok";
   }
 
   /** Where the painting itself (inside the moulding) sits: a canvas has its side edge right and below instead. */
@@ -315,8 +558,12 @@
       piece.inner = innerBox(p, band);
       return piece;
     });
+    var neighbours = stopNeighbours(pieces, reading);
     var stops = reading.order.map(function (i) {
-      return stopCamera(pieces[i], screen);
+      var n = neighbours[i];
+      var pick = function (j) { return j == null ? null : pieces[j]; };
+      var around = { left: pick(n.left), right: pick(n.right), above: pick(n.above), below: pick(n.below) };
+      return composeStopCamera(pieces[i], around, screen, pieces);
     });
     var zooms = stops.map(function (c) { return c.zoom; }).sort(function (a, b) { return a - b; });
     // Laid out at the typical stop zoom: the views the eye rests on most render at transform scale ~1.
@@ -332,6 +579,7 @@
       stops: stops,
       layoutScale: layoutScale,
       bounds: all,
+      neighbours: neighbours,
     };
   }
 
@@ -858,6 +1106,14 @@
 
   var api = {
     STOP_SCREEN_SHARE: STOP_SCREEN_SHARE,
+    STOP_SHARE_MIN: STOP_SHARE_MIN,
+    STOP_SHARE_MAX: STOP_SHARE_MAX,
+    STOP_MAX_OFFSET_SHARE: STOP_MAX_OFFSET_SHARE,
+    STOP_MIN_EDGE_SHARE: STOP_MIN_EDGE_SHARE,
+    GLIMPSE_MIN_SHARE: GLIMPSE_MIN_SHARE,
+    GLIMPSE_MAX_SHARE: GLIMPSE_MAX_SHARE,
+    SLIVER_SHARE: SLIVER_SHARE,
+    GLIMPSE_MIN_PX: GLIMPSE_MIN_PX,
     MIN_BAND_DEVICE_PX: MIN_BAND_DEVICE_PX,
     MIN_WALL_STOP_MS: MIN_WALL_STOP_MS,
     GLIDE_NOMINAL_MS: GLIDE_NOMINAL_MS,
@@ -890,6 +1146,10 @@
     readingOrder: readingOrder,
     fitCamera: fitCamera,
     stopCamera: stopCamera,
+    composeStopCamera: composeStopCamera,
+    glimpseOf: glimpseOf,
+    extentSeen: extentSeen,
+    stopNeighbours: stopNeighbours,
     imageRect: imageRect,
     imageUpscale: imageUpscale,
     planTour: planTour,
