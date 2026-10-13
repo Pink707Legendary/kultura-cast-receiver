@@ -201,6 +201,28 @@
   /** One keyframe per this many ms of a move (at least 8, at most 60): a smooth curve, a small message. */
   var KEYFRAME_STEP_MS = 100;
 
+  // ─── Spotlight (Yarden, 2026-10-13, option B: "a gallery at night with a spot on the painting") ───
+  // While the camera rests at a stop, everything beyond the painting and its neighbours' hints sinks into soft
+  // shadow: on a 16:9 screen a tall painting leaves ~30 % of the width on each side, where its row neighbours show
+  // large (judging/README.md); dimmed, they read as the room around the painting. The lit area is the painting's
+  // frame box plus, towards each neighbour in view, the hint composeStopCamera aimed for (its frame and a strip of
+  // its painting), else a small pad; darkness rises over SPOTLIGHT_FEATHER_SHARE beyond it (spotlightBox; the mask
+  // image is wallrender.js spotlightMask). It is ONE overlay fixed to the screen (wallview.js), moved in step with
+  // the camera during the close-up (spotlightTransform) and faded only by opacity, never shown during glides.
+  /** How dark the shadow is at full strength (black at this alpha; RENDER_FLAGS spotlightStrength overrides). */
+  var SPOTLIGHT_STRENGTH = 0.4;
+  /** Darkness rises from none to full over this share of the screen's width beyond the lit area (~67 CSS px). */
+  var SPOTLIGHT_FEATHER_SHARE = 0.07;
+  /** A side with no neighbour hint in view stays lit this share of the screen side beyond the frame. */
+  var SPOTLIGHT_PAD_SHARE = 0.02;
+  /** The overlay reaches this share of the screen beyond each screen edge (it moves with the close-up). */
+  var SPOTLIGHT_OVERLAY_MARGIN = 0.25;
+  /** It fades in this long after the camera arrives (the camera has settled), over SPOTLIGHT_FADE_IN_MS... */
+  var SPOTLIGHT_DELAY_MS = 600;
+  var SPOTLIGHT_FADE_IN_MS = 1500;
+  /** ...and out over this long from the release (back at the stop shot), done before the camera leaves. */
+  var SPOTLIGHT_FADE_OUT_MS = 1100;
+
   // ─── Memory ───
   /**
    * Wall images (the small tier: 660 px portrait, 1320 px for wide paintings) are given only to paintings near
@@ -810,7 +832,8 @@
    *             PREVIOUS: straight there)
    *   leadInMs: hold before leaving (a jump waits for the detail image on screen to fade out)
    *   seconds:  secondsPerArtwork;  motion: "gentle" | "still";  natural: detail image size if known
-   * Returns { index, pieceIndex, durationMs, segments, arrivalMs, closeUp, windows: { detail, caption, title, light } }.
+   * Returns { index, pieceIndex, durationMs, segments, arrivalMs, closeUp, windows: { detail, caption, title, light,
+   * spotlight } }.
    * Each segment: { name, startMs, endMs, from, to, move, easing, path } (path: cameras at even path steps).
    */
   function planStop(tour, index, o) {
@@ -908,7 +931,19 @@
         caption: { inMs: arrivalMs + CAPTION_DELAY_MS, inDurationMs: CAPTION_FADE_MS, outMs: captionOut, outDurationMs: CAPTION_FADE_MS },
         title: titleWindow && { inMs: titleWindow.inMs, inDurationMs: CAPTION_FADE_MS, outMs: titleWindow.outMs, outDurationMs: CAPTION_FADE_MS },
         light: lightDim,
+        spotlight: spotlightWindow(arrivalMs, releaseStart),
       },
+    };
+  }
+
+  /** The spotlight's window: in after the camera settles, out during the release (see "Spotlight"). */
+  function spotlightWindow(arrivalMs, releaseStart) {
+    var inMs = Math.min(arrivalMs + SPOTLIGHT_DELAY_MS, releaseStart);
+    return {
+      inMs: inMs,
+      inDurationMs: Math.max(0, Math.min(SPOTLIGHT_FADE_IN_MS, releaseStart - inMs)),
+      outMs: releaseStart,
+      outDurationMs: Math.min(SPOTLIGHT_FADE_OUT_MS, RELEASE_MS),
     };
   }
 
@@ -933,8 +968,84 @@
       caption: stop.windows.caption,
       title: stop.windows.title,
       light: null,
+      spotlight: stop.windows.spotlight,
     };
     return copy;
+  }
+
+  // ─── Spotlight geometry ───
+
+  /**
+   * The lit area of a stop (wall points { minX, minY, maxX, maxY }): the painting's frame box `piece`, grown on each
+   * side to cover the hint of that side's neighbour in `neighbours` ({ left, right, above, below }: pieces or null)
+   * when camera `cam` shows it (the hint target past the neighbour's near edge: its frame and a strip of painting),
+   * else by SPOTLIGHT_PAD_SHARE of the screen side. What lies beyond dims.
+   */
+  function spotlightBox(piece, neighbours, cam, screen) {
+    var nb = neighbours || {};
+    var padX = (SPOTLIGHT_PAD_SHARE * screen.width) / cam.zoom;
+    var padY = (SPOTLIGHT_PAD_SHARE * screen.height) / cam.zoom;
+    var box = { minX: piece.x - padX, minY: piece.y - padY, maxX: piece.x + piece.w + padX, maxY: piece.y + piece.h + padY };
+    var shows = function (n, side) {
+      return !!n && hintOf(cam, n, side, screen).kind !== "none";
+    };
+    if (shows(nb.left, "left")) box.minX = Math.min(box.minX, nb.left.x + nb.left.w - hintTarget(nb.left, "x", cam.zoom, screen));
+    if (shows(nb.right, "right")) box.maxX = Math.max(box.maxX, nb.right.x + hintTarget(nb.right, "x", cam.zoom, screen));
+    if (shows(nb.above, "above")) box.minY = Math.min(box.minY, nb.above.y + nb.above.h - hintTarget(nb.above, "y", cam.zoom, screen));
+    if (shows(nb.below, "below")) box.maxY = Math.max(box.maxY, nb.below.y + hintTarget(nb.below, "y", cam.zoom, screen));
+    return box;
+  }
+
+  /** A wall box { minX, minY, maxX, maxY } on screen at camera `cam`: { x0, y0, x1, y1 } in CSS px. */
+  function screenRect(box, cam, screen) {
+    return {
+      x0: screen.width / 2 + (box.minX - cam.cx) * cam.zoom,
+      y0: screen.height / 2 + (box.minY - cam.cy) * cam.zoom,
+      x1: screen.width / 2 + (box.maxX - cam.cx) * cam.zoom,
+      y1: screen.height / 2 + (box.maxY - cam.cy) * cam.zoom,
+    };
+  }
+
+  /**
+   * Tour position `index`'s spotlight: { box (wall points), rect (screen CSS px at the stop shot), feather (CSS px),
+   * overlay: { x, y, w, h } (the overlay's box at the stop shot, CSS px: the screen plus SPOTLIGHT_OVERLAY_MARGIN) }.
+   */
+  function spotlightPlan(tour, index) {
+    var pieceIndex = tour.order[index];
+    var n = tour.neighbours[pieceIndex];
+    var pick = function (j) { return j == null ? null : tour.pieces[j]; };
+    var cam = tour.stops[index];
+    var around = { left: pick(n.left), right: pick(n.right), above: pick(n.above), below: pick(n.below) };
+    var box = spotlightBox(tour.pieces[pieceIndex], around, cam, tour.screen);
+    var mx = SPOTLIGHT_OVERLAY_MARGIN * tour.screen.width;
+    var my = SPOTLIGHT_OVERLAY_MARGIN * tour.screen.height;
+    return {
+      box: box,
+      rect: screenRect(box, cam, tour.screen),
+      feather: SPOTLIGHT_FEATHER_SHARE * tour.screen.width,
+      overlay: { x: -mx, y: -my, w: tour.screen.width + 2 * mx, h: tour.screen.height + 2 * my },
+    };
+  }
+
+  /**
+   * The overlay's transform when the camera is at `cam`, for an overlay drawn for the stop shot `stopCam` and laid out
+   * at its box's size at left 0, top 0 (transform-origin 0 0; `overlay` from spotlightPlan): the stop's screen mapped
+   * onto the current one, so the lit area stays on the painting through the close-up. tx, ty and k are linear in the
+   * camera layer's (transformOf), so keyframes at the camera's offsets with its easing move both exactly together.
+   */
+  function spotlightTransform(cam, stopCam, tour, overlay) {
+    var a = transformOf(cam, tour);
+    var b = transformOf(stopCam, tour);
+    var k = cam.zoom / stopCam.zoom;
+    return { tx: a.tx - k * b.tx + k * overlay.x, ty: a.ty - k * b.ty + k * overlay.y, k: k };
+  }
+
+  /** Web Animation keyframes of the overlay during a move segment (the camera's offsets; its easing likewise). */
+  function spotlightKeyframes(segment, stopCam, tour, overlay) {
+    var n = segment.path.length - 1;
+    return segment.path.map(function (cam, j) {
+      return { offset: j / n, transform: transformString(spotlightTransform(cam, stopCam, tour, overlay)) };
+    });
   }
 
   // ─── Transforms and keyframes ───
@@ -1226,6 +1337,18 @@
     windowKeyframes: windowKeyframes,
     windowOpacityAt: windowOpacityAt,
     lightKeyframes: lightKeyframes,
+    SPOTLIGHT_STRENGTH: SPOTLIGHT_STRENGTH,
+    SPOTLIGHT_FEATHER_SHARE: SPOTLIGHT_FEATHER_SHARE,
+    SPOTLIGHT_PAD_SHARE: SPOTLIGHT_PAD_SHARE,
+    SPOTLIGHT_OVERLAY_MARGIN: SPOTLIGHT_OVERLAY_MARGIN,
+    SPOTLIGHT_DELAY_MS: SPOTLIGHT_DELAY_MS,
+    SPOTLIGHT_FADE_IN_MS: SPOTLIGHT_FADE_IN_MS,
+    SPOTLIGHT_FADE_OUT_MS: SPOTLIGHT_FADE_OUT_MS,
+    spotlightBox: spotlightBox,
+    screenRect: screenRect,
+    spotlightPlan: spotlightPlan,
+    spotlightTransform: spotlightTransform,
+    spotlightKeyframes: spotlightKeyframes,
     wallImageBytes: wallImageBytes,
     wallImagePlan: wallImagePlan,
   };
