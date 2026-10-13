@@ -139,6 +139,18 @@
       covering.style.backgroundSize = px(tile) + " " + px(tile);
       // The pattern is anchored at wall point 0,0 whatever the overscan.
       covering.style.backgroundPosition = px((overscan - b.minX) * L % tile) + " " + px((overscan - b.minY) * L % tile);
+      var res = renderFlags.coveringRes || 1;
+      if (res !== 1) {
+        // Test-only (coveringRes): the same covering laid out res times larger, scaled back by its own transform.
+        covering.style.width = px((b.maxX - b.minX + 2 * overscan) * L * res);
+        covering.style.height = px((b.maxY - b.minY + 2 * overscan) * L * res);
+        covering.style.backgroundSize = px(tile * res) + " " + px(tile * res);
+        covering.style.backgroundPosition = px(((overscan - b.minX) * L % tile) * res) + " " + px(((overscan - b.minY) * L % tile) * res);
+        covering.style.transformOrigin = "0 0";
+        covering.style.transform = "scale(" + (1 / res).toFixed(5) + ")";
+      } else {
+        covering.style.transform = "";
+      }
       piecesLayer.textContent = "";
       // The phone draws by artwork id, later on top: same here for overlapping Free-wall pieces.
       var byId = tour.pieces.slice().sort(function (a, c) { return a.id - c.id; });
@@ -536,6 +548,7 @@
         "rf-no-wall-images": renderFlags.wallImages === false,
         "rf-no-light": renderFlags.light === false,
         "rf-no-glass": renderFlags.glass === false,
+        "rf-piece-layers": renderFlags.pieceLayers === true,
       };
       for (var name in classes) stage.classList.toggle(name, classes[name]);
       camera.style.willChange = renderFlags.willChange ? "transform" : "";

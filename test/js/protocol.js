@@ -46,6 +46,8 @@
     glass: "boolean", // the blurred glass (backdrop-filter) of the wall caption and title
     willChange: "boolean", // will-change: transform on the camera
     overscanPt: [0, 20000], // how far the covering runs beyond the paintings (wall points); applied at the next wall
+    pieceLayers: "boolean", // each piece its own composited layer (raster scale not clamped by the whole wall's size)
+    coveringRes: [1, 8], // the covering laid out this many times larger and scaled back down (sharper while moving)
   };
 
   function readRenderFlags(flags) {
