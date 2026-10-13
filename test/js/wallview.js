@@ -455,6 +455,7 @@
           entry.img.src = entry.src;
         } else if (!keep[i] && entry.src) {
           entry.src = null;
+          entry.sharp = null;
           entry.img.removeAttribute("src");
         }
       });
@@ -839,7 +840,33 @@
       if ((seg.name === "hold" || seg.name === "release") && tour.order.length > 1) {
         var nextPos = (stopIndex + 1) % tour.order.length;
         if (!details[nextPos] && !fadingSlot) detailFor(nextPos);
+        if (renderFlags.glideImage !== "wall") sharpenForGlide(tour.order[nextPos]);
       }
+    }
+
+    /**
+     * The painting the camera glides to next shows its display image (~1320 px) instead of the small wall tier
+     * (~660 px, about 2x upscaled at a stop) for the glide, until its own detail image fades in: sharp while moving.
+     * Swapped while the camera rests, after decoding; the one before goes back to its wall tier (memory: two).
+     */
+    function sharpenForGlide(pieceIndex) {
+      var keepIndex = tour.order[stopIndex];
+      pieceEls.forEach(function (entry, i) {
+        if (entry.sharp && i !== pieceIndex && i !== keepIndex) {
+          entry.sharp = null;
+          if (entry.src) entry.img.src = entry.src;
+        }
+      });
+      var entry = pieceEls[pieceIndex];
+      var url = tour.pieces[pieceIndex].fallbackImageUrl;
+      if (!entry || !url || entry.sharp || !entry.src) return;
+      var probe = new Image();
+      entry.sharp = { url: url, img: probe };
+      options.loadImage(probe, url).then(function () {
+        if (entry.sharp && entry.sharp.img === probe && entry.src) entry.img.src = url;
+      }, function () {
+        if (entry.sharp && entry.sharp.img === probe) entry.sharp = null;
+      });
     }
 
     /**

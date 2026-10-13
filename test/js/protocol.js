@@ -54,6 +54,7 @@
     frameTex: ["auto", "900", "450", "300", "150"], // moulding level of detail picked per frame (auto) or one size
     detailRes: "boolean", // false: the detail image laid out at the painting's size (blurrier while moving)
     detailTiming: ["still", "early"], // the detail image placed and the next one fetched while still, or as before
+    glideImage: ["display", "wall"], // the next painting shows its ~1320 px display image for the glide, or its wall tier
     coveringLayer: "boolean", // false: the covering painted into the wall's layer
     coveringTile: ["seamless", "original"], // the seamless covering tiles (+ macro variation) or the website's
     coveringRes: [1, 8], // the covering laid out this many times larger and scaled back down (sharper while moving)
