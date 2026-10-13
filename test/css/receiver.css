@@ -313,12 +313,21 @@ html, body {
   background-color: #15281e;
 }
 
-#wall-stage[data-skin="damask"] .wall-covering { background-color: #15281e; background-image: url(../wall/wallpaper-green-damask.webp); }
-#wall-stage[data-skin="plum"] .wall-covering { background-color: #2a1621; background-image: url(../wall/wallpaper-plum-floral.webp); }
-#wall-stage[data-skin="navy"] .wall-covering { background-color: #121a2b; background-image: url(../wall/wallpaper-navy-linen.jpg); }
-#wall-stage[data-skin="teal"] .wall-covering { background-color: #173230; background-image: url(../wall/wall-deep-teal-paint.jpg); }
-#wall-stage[data-skin="limewash"] .wall-covering { background-color: #2a2a28; background-image: url(../wall/wall-limewash-charcoal.jpg); }
-#wall-stage[data-skin="graphite"] .wall-covering { background-color: #232120; background-image: url(../wall/wall-graphite-mineral.jpg); }
+/* Coverings: seamless tiles (scripts/make_wall_tiles.py; the plain walls a 1024 px crop at today's sharpness) under a
+   faint large "macro" variation of a size no tile divides (hides the repeat). wallview.js sets the two sizes.
+   .rf-covering-original (RENDER_FLAGS coveringTile original): the website's textures, as before. */
+#wall-stage[data-skin="damask"] .wall-covering { background-color: #15281e; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-damask.webp); }
+#wall-stage[data-skin="plum"] .wall-covering { background-color: #2a1621; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-plum.webp); }
+#wall-stage[data-skin="navy"] .wall-covering { background-color: #121a2b; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-navy.webp); }
+#wall-stage[data-skin="teal"] .wall-covering { background-color: #173230; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-teal.webp); }
+#wall-stage[data-skin="limewash"] .wall-covering { background-color: #2a2a28; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-limewash.webp); }
+#wall-stage[data-skin="graphite"] .wall-covering { background-color: #232120; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-graphite.jpg); }
+#wall-stage.rf-covering-original[data-skin="damask"] .wall-covering { background-image: url(../wall/wallpaper-green-damask.webp); }
+#wall-stage.rf-covering-original[data-skin="plum"] .wall-covering { background-image: url(../wall/wallpaper-plum-floral.webp); }
+#wall-stage.rf-covering-original[data-skin="navy"] .wall-covering { background-image: url(../wall/wallpaper-navy-linen.jpg); }
+#wall-stage.rf-covering-original[data-skin="teal"] .wall-covering { background-image: url(../wall/wall-deep-teal-paint.jpg); }
+#wall-stage.rf-covering-original[data-skin="limewash"] .wall-covering { background-image: url(../wall/wall-limewash-charcoal.jpg); }
+#wall-stage.rf-covering-original[data-skin="graphite"] .wall-covering { background-image: url(../wall/wall-graphite-mineral.jpg); }
 
 .wp {
   position: absolute;

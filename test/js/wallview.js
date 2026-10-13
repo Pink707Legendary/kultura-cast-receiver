@@ -21,6 +21,12 @@
 
   /** After the wall is built, wait at most this long for the first views' wall images before the tour starts. */
   var WALL_READY_WAIT_MS = 6000;
+  /**
+   * Work that re-rasters (layer and frame-level changes, placing the detail image, fetching the next one) waits this
+   * long after the camera comes to rest: right at a move's end it would drop frames while the camera still eases in;
+   * a moment later nothing moves, so a slower frame shows nothing.
+   */
+  var STILL_WORK_DELAY_MS = 450;
   /** The stage fades in over the start screen, and out when the wall mode ends. */
   var STAGE_FADE_MS = 900;
   /** A detail image that arrives after its fade-in time fades in on its own this fast. */
@@ -29,7 +35,14 @@
    * Covering texture tile, in wall points. The website draws 520 px (900 px wallpapers) and 627 px (1254 px plain
    * walls) on a wall ~1280 px wide; the TV's wall is 1000 points wide, so x 0.78.
    */
-  var COVERING_TILE_PT = { damask: 406, plum: 406, navy: 490, teal: 490, limewash: 490, graphite: 490 };
+  var COVERING_ORIGINAL_TILE_PT = { damask: 406, plum: 406, navy: 490, teal: 490, limewash: 490, graphite: 490 };
+  /**
+   * The seamless tiles (wall/tiles/, scripts/make_wall_tiles.py): the patterns keep their 900 px repeat; the plain
+   * walls are 1024 px crops of the 1254 px textures at the same sharpness (490 x 1024 / 1254 points).
+   */
+  var COVERING_TILE_PT = { damask: 406, plum: 406, navy: 400.13, teal: 400.13, limewash: 400.13, graphite: 400.13 };
+  /** The faint macro variation over the tile (wall/tiles/macro-a.webp), a size no tile divides: hides the repeat. */
+  var COVERING_MACRO_PT = 1733;
   /** One website px in wall points (for the website's shadow and lip numbers, --u in receiver.css). */
   var WEBSITE_PX_PT = 0.78;
   /**
@@ -119,6 +132,7 @@
     var plannedSegment = null;
     /** The segment the layers, frame levels and detail placement were last updated for. */
     var renderSegment = null;
+    var stillWorkTimer = null;
     var lastError = null;
     /** Test-only render switches (protocol.js RENDER_FLAG_SPEC; {} = the normal look). */
     var renderFlags = {};
@@ -146,17 +160,27 @@
       covering.style.top = px((b.minY - overscan) * L);
       covering.style.width = px((b.maxX - b.minX + 2 * overscan) * L);
       covering.style.height = px((b.maxY - b.minY + 2 * overscan) * L);
-      var tile = (COVERING_TILE_PT[wall.skin] || 406) * L;
-      covering.style.backgroundSize = px(tile) + " " + px(tile);
-      // The pattern is anchored at wall point 0,0 whatever the overscan.
-      covering.style.backgroundPosition = px((overscan - b.minX) * L % tile) + " " + px((overscan - b.minY) * L % tile);
+      var original = renderFlags.coveringTile === "original";
+      stage.classList.toggle("rf-covering-original", original);
+      var tile = ((original ? COVERING_ORIGINAL_TILE_PT : COVERING_TILE_PT)[wall.skin] || 406) * L;
+      var macro = COVERING_MACRO_PT * L;
       var res = renderFlags.coveringRes || 1;
+      // Both patterns are anchored at wall point 0,0 whatever the overscan (sizes x res: see coveringRes below).
+      var layerCss = function (size) {
+        var s = size * res;
+        return {
+          size: px(s) + " " + px(s),
+          position: px(((overscan - b.minX) * L * res) % s) + " " + px(((overscan - b.minY) * L * res) % s),
+        };
+      };
+      var t = layerCss(tile);
+      var m = layerCss(macro);
+      covering.style.backgroundSize = original ? t.size : m.size + ", " + t.size;
+      covering.style.backgroundPosition = original ? t.position : m.position + ", " + t.position;
       if (res !== 1) {
         // Test-only (coveringRes): the same covering laid out res times larger, scaled back by its own transform.
         covering.style.width = px((b.maxX - b.minX + 2 * overscan) * L * res);
         covering.style.height = px((b.maxY - b.minY + 2 * overscan) * L * res);
-        covering.style.backgroundSize = px(tile * res) + " " + px(tile * res);
-        covering.style.backgroundPosition = px(((overscan - b.minX) * L % tile) * res) + " " + px(((overscan - b.minY) * L % tile) * res);
         covering.style.transformOrigin = "0 0";
         covering.style.transform = "scale(" + (1 / res).toFixed(5) + ")" + (renderFlags.coveringLayer === false ? "" : " translateZ(0)");
       } else {
@@ -514,7 +538,9 @@
      */
     function mayPlaceDetail(t) {
       if (renderFlags.detailTiming === "early") return true;
-      return !!stop && t >= stop.arrivalMs - 1 && !Tour.segmentAt(stop, t).move;
+      if (!stop || t < stop.arrivalMs - 1) return false;
+      var seg = Tour.segmentAt(stop, t);
+      return !seg.move && t >= Math.min(seg.startMs + STILL_WORK_DELAY_MS, seg.endMs) - 5;
     }
 
     /** A detail image finished loading: show it if its stop is on screen (re-planning the close-up if needed). */
@@ -568,6 +594,7 @@
     }
 
     function stopAnimations() {
+      clearTimeout(stillWorkTimer);
       if (!anims) return;
       clearTimeout(anims.timer);
       cancelAll([anims.clock, anims.caption, anims.title, anims.light, anims.detail, anims.move]);
@@ -711,20 +738,14 @@
       }
       if (seg !== renderSegment) {
         renderSegment = seg;
+        clearTimeout(stillWorkTimer);
         // Layers and frame levels change only while the camera rests (or as a stop starts: a NEXT / PREVIOUS jump,
         // the first stop; for the tour moving on, the plan made during the last stop's release still holds).
-        if (!seg.move || seg.startMs === 0) planRender(seg.move ? t : Math.max(t, seg.startMs));
-        if (!seg.move && t >= stop.arrivalMs - 1) {
-          var here = details[stopIndex];
-          if (here && here.state === "ready" && !detailShown(here)) {
-            var tAttach = clockTime();
-            if (renderFlags.detailTiming !== "early") attachDetailToStop(here, tAttach);
-          }
-          // The next stop's image: fetched and decoded while the camera holds still (the 2-image cap holds).
-          if ((seg.name === "hold" || seg.name === "release") && tour.order.length > 1) {
-            var nextPos = (stopIndex + 1) % tour.order.length;
-            if (!details[nextPos] && !fadingSlot) detailFor(nextPos);
-          }
+        if (seg.move && seg.startMs === 0) planRender(t);
+        if (!seg.move) {
+          var due = Math.min(seg.startMs + STILL_WORK_DELAY_MS, seg.endMs - 1) - t;
+          if (due <= 0 || frozen()) stillWork(seg);
+          else stillWorkTimer = setTimeout(function () { stillWork(seg); }, due);
         }
       }
       var still = frozen();
@@ -756,6 +777,21 @@
       if (!still) {
         var next = pauseAtArrival && t < stop.arrivalMs ? Math.min(seg.endMs, stop.arrivalMs) : seg.endMs;
         anims.timer = setTimeout(sync, Math.max(0, next - t) + 5);
+      }
+    }
+
+    /** While the camera rests in `seg`: layers and frame levels, the detail image, the next stop's image. */
+    function stillWork(seg) {
+      if (!anims || !stop || renderSegment !== seg) return;
+      var t = Math.max(clockTime(), seg.startMs);
+      planRender(t);
+      if (t < stop.arrivalMs - 1) return;
+      var here = details[stopIndex];
+      if (here && here.state === "ready" && !detailShown(here) && renderFlags.detailTiming !== "early") attachDetailToStop(here, clockTime());
+      // The next stop's image: fetched and decoded while the camera holds still (the 2-image cap holds).
+      if ((seg.name === "hold" || seg.name === "release") && tour.order.length > 1) {
+        var nextPos = (stopIndex + 1) % tour.order.length;
+        if (!details[nextPos] && !fadingSlot) detailFor(nextPos);
       }
     }
 
