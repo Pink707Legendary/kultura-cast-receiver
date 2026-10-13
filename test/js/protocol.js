@@ -30,6 +30,43 @@
     return typeof value === "number" && isFinite(value);
   }
 
+  /**
+   * Test-only render switches for wall mode (RENDER_FLAGS, dev tools only; the app never sends it). Each key: a
+   * kind ("boolean"), a list of allowed strings, or [min, max] for a number. A missing key keeps the normal look.
+   * wallview.js setRenderFlags applies them; scripts/cast_dev_sender.py render-flags sends them.
+   */
+  var RENDER_FLAG_SPEC = {
+    shadows: "boolean", // the pieces' outer box-shadows
+    lips: "boolean", // the inset shadow inside each frame
+    frames: ["texture", "flat", "none"], // border-image moulding, a flat colour band, or nothing
+    covering: ["texture", "flat", "none"], // wallpaper texture, its flat colour, or the stage colour only
+    detail: "boolean", // the visited painting's large image
+    wallImages: "boolean", // the pieces' small images (their main colour stays)
+    light: "boolean", // the room light overlay (fixed to the viewer)
+    glass: "boolean", // the blurred glass (backdrop-filter) of the wall caption and title
+    willChange: "boolean", // will-change: transform on the camera
+    overscanPt: [0, 20000], // how far the covering runs beyond the paintings (wall points); applied at the next wall
+  };
+
+  function readRenderFlags(flags) {
+    if (!flags || typeof flags !== "object" || Array.isArray(flags)) return null;
+    var out = {};
+    for (var key in RENDER_FLAG_SPEC) {
+      if (!Object.prototype.hasOwnProperty.call(RENDER_FLAG_SPEC, key) || !(key in flags)) continue;
+      var spec = RENDER_FLAG_SPEC[key];
+      var value = flags[key];
+      if (spec === "boolean") {
+        if (typeof value !== "boolean") return null;
+      } else if (typeof spec[0] === "string") {
+        if (spec.indexOf(value) < 0) return null;
+      } else if (!isFiniteNumber(value) || value < spec[0] || value > spec[1]) {
+        return null;
+      }
+      out[key] = value;
+    }
+    return out;
+  }
+
   function isAllowedImageUrl(url) {
     if (typeof url !== "string") return false;
     for (var i = 0; i < ALLOWED_IMAGE_PREFIXES.length; i++) {
@@ -310,6 +347,11 @@
       // debug mode: page URL with ?debug, or after DEBUG_MODE {enabled: true} in this session.
       case "DEBUG_MODE":
         return typeof data.enabled === "boolean" ? { type: "DEBUG_MODE", enabled: data.enabled } : null;
+      case "RENDER_FLAGS": {
+        // Test-only (acted on in debug mode only). {} returns to the normal look; one invalid value drops it all.
+        var renderFlags = readRenderFlags(data.flags);
+        return renderFlags ? { type: "RENDER_FLAGS", flags: renderFlags } : null;
+      }
       case "SEEK":
         if (!isFiniteNumber(data.timeMs) || data.timeMs < 0 || data.timeMs > MAX_SECONDS * 1000) return null;
         return { type: "SEEK", timeMs: data.timeMs, pause: data.pause === true };
@@ -335,6 +377,7 @@
     MAX_WALL_COORD: MAX_WALL_COORD,
     WALL_SKINS: WALL_SKINS,
     FRAME_KINDS: FRAME_KINDS,
+    RENDER_FLAG_SPEC: RENDER_FLAG_SPEC,
     isAllowedImageUrl: isAllowedImageUrl,
     readArtwork: readArtwork,
     readWallPiece: readWallPiece,

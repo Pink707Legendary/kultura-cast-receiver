@@ -96,6 +96,8 @@
    * never sends either. See protocol.js.
    */
   var debugMode = /[?&]debug\b/.test(window.location.search || "");
+  /** Test-only wall render switches (RENDER_FLAGS, debug mode only; protocol.js RENDER_FLAG_SPEC). Kept for the session. */
+  var renderFlags = {};
   /** Incremented per transition, so a late cleanup never hides a layer that has become active again. */
   var transitionToken = 0;
   var activeLayerId = "a";
@@ -278,6 +280,7 @@
       motion: slide.motion,
       transitionMs: Motion.TRANSITION_MS,
       debugMode: debugMode,
+      renderFlags: renderFlags,
       frameMs: frameTimeStats(),
       phaseMs: Date.now() - phaseStartedAt,
       preparing: isPreparing,
@@ -906,6 +909,13 @@
         debugMode = command.enabled;
         sendStatus();
         break;
+      case "RENDER_FLAGS":
+        // Test-only (scripts/cast_dev_sender.py render-flags, tv_motion_probe.py --render-flags).
+        if (!debugMode) return;
+        renderFlags = command.flags;
+        ensureWallView().setRenderFlags(renderFlags);
+        sendStatus();
+        break;
       case "SEEK":
         // Test-only (tv_capture.py): jump the slide (wall mode: the stop) on screen to an exact time.
         if (!debugMode) return;
@@ -986,6 +996,7 @@
         sendStatus();
       },
     });
+    wallView.setRenderFlags(renderFlags);
     return wallView;
   }
 

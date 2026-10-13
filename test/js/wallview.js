@@ -117,6 +117,8 @@
     /** The segment whose views the wall images were last planned for. */
     var plannedSegment = null;
     var lastError = null;
+    /** Test-only render switches (protocol.js RENDER_FLAG_SPEC; {} = the normal look). */
+    var renderFlags = {};
 
     // ─── Building the wall ───
 
@@ -126,7 +128,9 @@
       stage.setAttribute("data-room", wall.room);
       camera.style.setProperty("--u", px(L * WEBSITE_PX_PT));
       var b = tour.bounds;
-      var overscan = Math.max(COVERING_OVERSCAN_PT, COVERING_OVERSCAN_WALLS * Math.max(b.maxX - b.minX, b.maxY - b.minY));
+      var overscan = renderFlags.overscanPt != null
+        ? renderFlags.overscanPt
+        : Math.max(COVERING_OVERSCAN_PT, COVERING_OVERSCAN_WALLS * Math.max(b.maxX - b.minX, b.maxY - b.minY));
       covering.style.left = px((b.minX - overscan) * L);
       covering.style.top = px((b.minY - overscan) * L);
       covering.style.width = px((b.maxX - b.minX + 2 * overscan) * L);
@@ -515,6 +519,28 @@
       }
     }
 
+    /**
+     * Test-only (RENDER_FLAGS): switch costly parts of the look off one at a time to measure their share of the
+     * frame. Classes on the stage (receiver.css "Render flags"); overscanPt applies when the next wall is built.
+     */
+    function setRenderFlags(flags) {
+      renderFlags = flags || {};
+      var classes = {
+        "rf-no-shadows": renderFlags.shadows === false,
+        "rf-no-lips": renderFlags.lips === false,
+        "rf-frames-flat": renderFlags.frames === "flat",
+        "rf-frames-none": renderFlags.frames === "none",
+        "rf-covering-flat": renderFlags.covering === "flat",
+        "rf-covering-none": renderFlags.covering === "none",
+        "rf-no-detail": renderFlags.detail === false,
+        "rf-no-wall-images": renderFlags.wallImages === false,
+        "rf-no-light": renderFlags.light === false,
+        "rf-no-glass": renderFlags.glass === false,
+      };
+      for (var name in classes) stage.classList.toggle(name, classes[name]);
+      camera.style.willChange = renderFlags.willChange ? "transform" : "";
+    }
+
     // ─── Public ───
 
     function load(validatedWall, view, dpr, initialSettings) {
@@ -655,6 +681,7 @@
           }, 0) / 1048576),
         },
         lastError: lastError,
+        renderFlags: renderFlags,
       };
     }
 
@@ -678,6 +705,8 @@
       },
       captionOnRight: function () { return caption.classList.contains("label-right"); },
       diagnostics: diagnostics,
+      setRenderFlags: setRenderFlags,
+      renderFlags: function () { return renderFlags; },
     };
   }
 
