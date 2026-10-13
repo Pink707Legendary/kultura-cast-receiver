@@ -890,6 +890,8 @@
       };
       for (var name in classes) stage.classList.toggle(name, classes[name]);
       camera.style.willChange = renderFlags.willChange ? "transform" : "";
+      // Layer and frame-level switches apply at once (A/B stills on the TV at the same view).
+      if (tour && stop && anims) planRender(clockTime());
     }
 
     // ─── Public ───
