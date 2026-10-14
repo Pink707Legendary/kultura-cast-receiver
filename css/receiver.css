@@ -279,3 +279,287 @@ html, body {
 @keyframes kultura-spin {
   to { transform: rotate(360deg); }
 }
+
+/* ─── Wall mode (receiver 2.9.0, js/wallview.js + js/walltour.js) ─── */
+/* The person's wall as a camera tour. Two layers inside ONE camera transform (.wall-camera, transform-origin
+   0 0, animated by wallview.js only during moves; holds are static so the TV re-rasters them sharp):
+   the wall (covering, frames, small images) and the detail layer (only the visited painting's large image).
+   Sizes are layout px: wall points x the tour's layout scale (--u = one website px, ~0.78 wall points, so the
+   website's shadow and lip numbers are used as they are). Textures: wall/ (copied from the website's
+   frontend/public/wall/; frames as WebP, the noisy 1254 px plain walls stay JPEG, WebP made them larger). */
+#wall-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  background: #101611;
+}
+
+#wall-stage.hidden {
+  display: none;
+}
+
+.wall-camera,
+.wall-clock {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+
+.wall-covering {
+  position: absolute;
+  background-repeat: repeat;
+  background-color: #15281e;
+}
+
+/* Coverings: seamless tiles (scripts/make_wall_tiles.py; the plain walls a 1024 px crop at today's sharpness) under a
+   faint large "macro" variation of a size no tile divides (hides the repeat). wallview.js sets the two sizes.
+   .rf-covering-original (RENDER_FLAGS coveringTile original): the website's textures, as before. */
+#wall-stage[data-skin="damask"] .wall-covering { background-color: #15281e; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-damask.webp); }
+#wall-stage[data-skin="plum"] .wall-covering { background-color: #2a1621; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-plum.webp); }
+#wall-stage[data-skin="navy"] .wall-covering { background-color: #121a2b; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-navy.webp); }
+#wall-stage[data-skin="teal"] .wall-covering { background-color: #173230; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-teal.webp); }
+#wall-stage[data-skin="limewash"] .wall-covering { background-color: #2a2a28; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-limewash.webp); }
+#wall-stage[data-skin="graphite"] .wall-covering { background-color: #232120; background-image: url(../wall/tiles/macro-a.webp), url(../wall/tiles/tile-graphite.jpg); }
+#wall-stage.rf-covering-original[data-skin="damask"] .wall-covering { background-image: url(../wall/wallpaper-green-damask.webp); }
+#wall-stage.rf-covering-original[data-skin="plum"] .wall-covering { background-image: url(../wall/wallpaper-plum-floral.webp); }
+#wall-stage.rf-covering-original[data-skin="navy"] .wall-covering { background-image: url(../wall/wallpaper-navy-linen.jpg); }
+#wall-stage.rf-covering-original[data-skin="teal"] .wall-covering { background-image: url(../wall/wall-deep-teal-paint.jpg); }
+#wall-stage.rf-covering-original[data-skin="limewash"] .wall-covering { background-image: url(../wall/wall-limewash-charcoal.jpg); }
+#wall-stage.rf-covering-original[data-skin="graphite"] .wall-covering { background-image: url(../wall/wall-graphite-mineral.jpg); }
+
+.wp {
+  position: absolute;
+}
+
+/* The shadow on the wall (website wall.module.css .shadow: a canvas stands off the wall, deeper, down and to the
+   right). Drawn from images wallview.js computes once per wall (wallrender.js: the same Gaussian blur as these
+   box-shadows, set inline as a nine-slice border-image or a per-size background): a live blur cost the TV's GPU the
+   most raster time of anything on the wall. The box-shadows below are the reference (RENDER_FLAGS shadowStyle css). */
+.wp-shadow {
+  position: absolute;
+  inset: 0;
+  border: 0 solid transparent;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
+.rf-css-shadows .wp-shadow,
+.rf-css-shadows .wp-lip {
+  left: 0 !important;
+  top: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  border-width: 0 !important;
+}
+
+.rf-css-shadows .wp-shadow {
+  border-image: none !important;
+  background-image: none !important;
+  box-shadow: 0 calc(30 * var(--u)) calc(40 * var(--u)) calc(-12 * var(--u)) rgba(0, 0, 0, 0.7),
+    0 calc(8 * var(--u)) calc(14 * var(--u)) rgba(0, 0, 0, 0.42);
+}
+
+.rf-css-shadows .wp[data-frame="canvas"] .wp-shadow {
+  box-shadow: calc(16 * var(--u)) calc(30 * var(--u)) calc(38 * var(--u)) calc(-10 * var(--u)) rgba(0, 0, 0, 0.72),
+    calc(5 * var(--u)) calc(9 * var(--u)) calc(14 * var(--u)) rgba(0, 0, 0, 0.42);
+}
+
+/* The painting itself; its main colour shows until (or instead of) the small image (memory budget). */
+.wp-canvas {
+  position: absolute;
+  overflow: hidden;
+}
+
+/* An image taken back (memory budget) or failed shows the painting's colour, never a broken-image icon. */
+.wp-canvas img:not([src]) {
+  visibility: hidden;
+}
+
+.wp-canvas img,
+.wall-detail img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* The lip: the frame's shade on the painting's edge (inset shadows; drawn from images like .wp-shadow). */
+.wp-lip {
+  position: absolute;
+  inset: 0;
+  border: 0 solid transparent;
+  background-repeat: no-repeat;
+}
+
+.rf-css-shadows .wp-lip {
+  border-image: none !important;
+  background-image: none !important;
+  box-shadow: inset 0 calc(6 * var(--u)) calc(9 * var(--u)) calc(-2 * var(--u)) rgba(0, 0, 0, 0.55),
+    inset 0 0 calc(3 * var(--u)) var(--u) rgba(0, 0, 0, 0.45);
+}
+
+.rf-css-shadows .wp[data-frame="oak"] .wp-lip,
+.rf-css-shadows .wp[data-frame="maple"] .wp-lip,
+.rf-css-shadows .wp[data-frame="brass"] .wp-lip,
+.rf-css-shadows .wp[data-frame="thin"] .wp-lip,
+.rf-css-shadows .wp[data-frame="float"] .wp-lip {
+  box-shadow: inset 0 calc(2 * var(--u)) calc(4 * var(--u)) rgba(0, 0, 0, 0.35);
+}
+
+.rf-css-shadows .wp[data-frame="canvas"] .wp-lip {
+  box-shadow: inset 0 0 var(--u) rgba(0, 0, 0, 0.45);
+}
+
+/* Mouldings: the website's textures and slice rules (wall.module.css .frame). */
+.wp-frame {
+  position: absolute;
+  inset: 0;
+  border: var(--band) solid transparent;
+}
+
+.wp-frame[data-frame="gold"] { border-image: url(../wall/frame-carved-gold-deep.webp) 20% stretch; }
+.wp-frame[data-frame="gilded"] { border-image: url(../wall/frame-gilded-gold.webp) 16% stretch; }
+.wp-frame[data-frame="walnut"] { border-image: url(../wall/frame-dark-walnut.webp) 12% stretch; }
+.wp-frame[data-frame="lacquer"] { border-image: url(../wall/frame-black-lacquer.webp) 12% stretch; }
+.wp-frame[data-frame="oak"] { border-image: url(../wall/frame-oak-thin.webp) 6.5% stretch; }
+.wp-frame[data-frame="thin"] { border-image: url(../wall/frame-black-thin.webp) 4.5% stretch; }
+.wp-frame[data-frame="float"] { border-image: url(../wall/frame-float-walnut.webp) 6.7% stretch; }
+.wp-frame[data-frame="cassetta"] { border-image: url(../wall/frame-renaissance-cassetta.webp) 16.7% round; }
+.wp-frame[data-frame="acanthus"] { border-image: url(../wall/frame-baroque-acanthus.webp) 17.3% round; }
+.wp-frame[data-frame="venetian"] { border-image: url(../wall/frame-venetian-worn-gold.webp) 18% round; }
+.wp-frame[data-frame="louis"] { border-image: url(../wall/frame-louis-silver.webp) 16% round; }
+.wp-frame[data-frame="victorian"] { border-image: url(../wall/frame-victorian-linen.webp) 16.5% round; }
+.wp-frame[data-frame="ripple"] { border-image: url(../wall/frame-dutch-ebony-ripple.webp) 13.5% round; }
+.wp-frame[data-frame="maple"] { border-image: url(../wall/frame-maple-box.webp) 8.5% stretch; }
+.wp-frame[data-frame="brass"] { border-image: url(../wall/frame-brass-slim.webp) 3.3% stretch; }
+
+/* A canvas (no frame): its side edge, one band of a dark tone of the painting, right and below (colours set
+   by wallview.js); the outermost band stays empty wall. */
+.wp-frame[data-frame="canvas"] {
+  inset: 0 var(--band) var(--band) 0;
+  border-width: 0 var(--band) var(--band) 0;
+  border-style: solid;
+}
+
+/* The visited painting's large image, exactly over its inner box; its wrapper's opacity is animated. */
+.wall-detail-stop {
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0;
+}
+
+/* The room's light, fixed to the viewer (website wall.module.css .light); dims while the camera is close. */
+.wall-light {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 80% 55% at 50% -8%, rgba(255, 226, 170, 0.16), transparent 70%),
+    radial-gradient(ellipse at 50% 45%, transparent 45%, rgba(0, 0, 0, 0.6) 100%);
+}
+
+#wall-stage[data-room="float"] .wall-light {
+  background: radial-gradient(ellipse 80% 40% at 50% -10%, rgba(255, 230, 190, 0.06), transparent 70%),
+    radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(0, 0, 0, 0.42) 100%);
+}
+
+/* "<name> · N artworks" over the opening shot: the wall label's glass, top-left. */
+.wall-title {
+  top: 6vh;
+  bottom: auto;
+}
+
+/* Render flags (test-only RENDER_FLAGS message, wallview.js setRenderFlags): parts of the look switched off one at
+   a time to measure what a camera move costs on the TV. Never set in normal use. */
+.rf-no-shadows .wp-shadow,
+.rf-no-lips .wp-lip,
+.rf-frames-none .wp-frame,
+.rf-no-detail .wall-detail,
+.rf-no-light .wall-light {
+  display: none;
+}
+.rf-no-wall-images .wp-canvas img {
+  visibility: hidden;
+}
+.rf-frames-flat .wp-frame:not([data-frame="canvas"]) {
+  border-image: none;
+  border-color: #6b5631;
+}
+#wall-stage.rf-covering-flat .wall-covering {
+  background-image: none;
+}
+#wall-stage.rf-covering-none .wall-covering {
+  display: none;
+}
+#wall-stage.rf-no-glass .metadata-overlay {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background: rgba(12, 12, 12, 0.7);
+}
+/* A painting near the camera's path: its own small composited layer (frame, image, lip and shadow together), so
+   Chrome rasters it at full resolution while the camera moves (one huge animated layer is capped to ~1 screen of
+   pixels: blur). wallview.js bounds how many (wallrender.js MAX_PIECE_LAYERS). */
+.wp.wp-layer {
+  transform: translateZ(0);
+}
+
+/* will-change (default; wallview.js planRender): Chrome keeps such a layer's largest raster when a move ends instead
+   of re-rastering it right then (a dropped frame as the camera eases in). wallview.js drops it again, while the
+   camera rests, from a layer whose raster has grown well past the view (shrunk on screen, a moulding would alias). */
+.wp.wp-layer.wp-hold {
+  transform: none;
+  will-change: transform;
+}
+
+/* Frame level of detail (wallrender.js frameLod, set by wallview.js as data-lod while the camera is still): the
+   same mouldings pre-filtered to 450 / 300 / 150 px (scripts/make_frame_lods.py), so a band a few device px wide
+   shows no moire. No data-lod (or 900) = the website's 900 px texture. */
+.wp-frame[data-lod="450"][data-frame="gold"] { border-image-source: url(../wall/lod450/frame-carved-gold-deep.webp); }
+.wp-frame[data-lod="450"][data-frame="gilded"] { border-image-source: url(../wall/lod450/frame-gilded-gold.webp); }
+.wp-frame[data-lod="450"][data-frame="walnut"] { border-image-source: url(../wall/lod450/frame-dark-walnut.webp); }
+.wp-frame[data-lod="450"][data-frame="lacquer"] { border-image-source: url(../wall/lod450/frame-black-lacquer.webp); }
+.wp-frame[data-lod="450"][data-frame="oak"] { border-image-source: url(../wall/lod450/frame-oak-thin.webp); }
+.wp-frame[data-lod="450"][data-frame="thin"] { border-image-source: url(../wall/lod450/frame-black-thin.webp); }
+.wp-frame[data-lod="450"][data-frame="float"] { border-image-source: url(../wall/lod450/frame-float-walnut.webp); }
+.wp-frame[data-lod="450"][data-frame="cassetta"] { border-image-source: url(../wall/lod450/frame-renaissance-cassetta.webp); }
+.wp-frame[data-lod="450"][data-frame="acanthus"] { border-image-source: url(../wall/lod450/frame-baroque-acanthus.webp); }
+.wp-frame[data-lod="450"][data-frame="venetian"] { border-image-source: url(../wall/lod450/frame-venetian-worn-gold.webp); }
+.wp-frame[data-lod="450"][data-frame="louis"] { border-image-source: url(../wall/lod450/frame-louis-silver.webp); }
+.wp-frame[data-lod="450"][data-frame="victorian"] { border-image-source: url(../wall/lod450/frame-victorian-linen.webp); }
+.wp-frame[data-lod="450"][data-frame="ripple"] { border-image-source: url(../wall/lod450/frame-dutch-ebony-ripple.webp); }
+.wp-frame[data-lod="450"][data-frame="maple"] { border-image-source: url(../wall/lod450/frame-maple-box.webp); }
+.wp-frame[data-lod="450"][data-frame="brass"] { border-image-source: url(../wall/lod450/frame-brass-slim.webp); }
+.wp-frame[data-lod="300"][data-frame="gold"] { border-image-source: url(../wall/lod300/frame-carved-gold-deep.webp); }
+.wp-frame[data-lod="300"][data-frame="gilded"] { border-image-source: url(../wall/lod300/frame-gilded-gold.webp); }
+.wp-frame[data-lod="300"][data-frame="walnut"] { border-image-source: url(../wall/lod300/frame-dark-walnut.webp); }
+.wp-frame[data-lod="300"][data-frame="lacquer"] { border-image-source: url(../wall/lod300/frame-black-lacquer.webp); }
+.wp-frame[data-lod="300"][data-frame="oak"] { border-image-source: url(../wall/lod300/frame-oak-thin.webp); }
+.wp-frame[data-lod="300"][data-frame="thin"] { border-image-source: url(../wall/lod300/frame-black-thin.webp); }
+.wp-frame[data-lod="300"][data-frame="float"] { border-image-source: url(../wall/lod300/frame-float-walnut.webp); }
+.wp-frame[data-lod="300"][data-frame="cassetta"] { border-image-source: url(../wall/lod300/frame-renaissance-cassetta.webp); }
+.wp-frame[data-lod="300"][data-frame="acanthus"] { border-image-source: url(../wall/lod300/frame-baroque-acanthus.webp); }
+.wp-frame[data-lod="300"][data-frame="venetian"] { border-image-source: url(../wall/lod300/frame-venetian-worn-gold.webp); }
+.wp-frame[data-lod="300"][data-frame="louis"] { border-image-source: url(../wall/lod300/frame-louis-silver.webp); }
+.wp-frame[data-lod="300"][data-frame="victorian"] { border-image-source: url(../wall/lod300/frame-victorian-linen.webp); }
+.wp-frame[data-lod="300"][data-frame="ripple"] { border-image-source: url(../wall/lod300/frame-dutch-ebony-ripple.webp); }
+.wp-frame[data-lod="300"][data-frame="maple"] { border-image-source: url(../wall/lod300/frame-maple-box.webp); }
+.wp-frame[data-lod="300"][data-frame="brass"] { border-image-source: url(../wall/lod300/frame-brass-slim.webp); }
+.wp-frame[data-lod="150"][data-frame="gold"] { border-image-source: url(../wall/lod150/frame-carved-gold-deep.webp); }
+.wp-frame[data-lod="150"][data-frame="gilded"] { border-image-source: url(../wall/lod150/frame-gilded-gold.webp); }
+.wp-frame[data-lod="150"][data-frame="walnut"] { border-image-source: url(../wall/lod150/frame-dark-walnut.webp); }
+.wp-frame[data-lod="150"][data-frame="lacquer"] { border-image-source: url(../wall/lod150/frame-black-lacquer.webp); }
+.wp-frame[data-lod="150"][data-frame="oak"] { border-image-source: url(../wall/lod150/frame-oak-thin.webp); }
+.wp-frame[data-lod="150"][data-frame="thin"] { border-image-source: url(../wall/lod150/frame-black-thin.webp); }
+.wp-frame[data-lod="150"][data-frame="float"] { border-image-source: url(../wall/lod150/frame-float-walnut.webp); }
+.wp-frame[data-lod="150"][data-frame="cassetta"] { border-image-source: url(../wall/lod150/frame-renaissance-cassetta.webp); }
+.wp-frame[data-lod="150"][data-frame="acanthus"] { border-image-source: url(../wall/lod150/frame-baroque-acanthus.webp); }
+.wp-frame[data-lod="150"][data-frame="venetian"] { border-image-source: url(../wall/lod150/frame-venetian-worn-gold.webp); }
+.wp-frame[data-lod="150"][data-frame="louis"] { border-image-source: url(../wall/lod150/frame-louis-silver.webp); }
+.wp-frame[data-lod="150"][data-frame="victorian"] { border-image-source: url(../wall/lod150/frame-victorian-linen.webp); }
+.wp-frame[data-lod="150"][data-frame="ripple"] { border-image-source: url(../wall/lod150/frame-dutch-ebony-ripple.webp); }
+.wp-frame[data-lod="150"][data-frame="maple"] { border-image-source: url(../wall/lod150/frame-maple-box.webp); }
+.wp-frame[data-lod="150"][data-frame="brass"] { border-image-source: url(../wall/lod150/frame-brass-slim.webp); }

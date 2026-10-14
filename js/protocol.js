@@ -30,6 +30,55 @@
     return typeof value === "number" && isFinite(value);
   }
 
+  /**
+   * Test-only render switches for wall mode (RENDER_FLAGS, dev tools only; the app never sends it). Each key: a
+   * kind ("boolean"), a list of allowed strings, or [min, max] for a number. A missing key keeps the normal look.
+   * wallview.js setRenderFlags applies them; scripts/cast_dev_sender.py render-flags sends them.
+   */
+  var RENDER_FLAG_SPEC = {
+    shadows: "boolean", // the pieces' outer box-shadows
+    lips: "boolean", // the inset shadow inside each frame
+    frames: ["texture", "flat", "none"], // border-image moulding, a flat colour band, or nothing
+    covering: ["texture", "flat", "none"], // wallpaper texture, its flat colour, or the stage colour only
+    detail: "boolean", // the visited painting's large image
+    wallImages: "boolean", // the pieces' small images (their main colour stays)
+    light: "boolean", // the room light overlay (fixed to the viewer)
+    glass: "boolean", // the blurred glass (backdrop-filter) of the wall caption and title
+    willChange: "boolean", // will-change: transform on the camera
+    overscanPt: [0, 20000], // how far the covering runs beyond the paintings (wall points); applied at the next wall
+    // The rendering fixes of 2.9.0 (wallrender.js), each on by default; these switch one off for A/B on the TV:
+    shadowStyle: ["baked", "css"], // shadows and lips from computed images (default) or the original CSS blurs
+    pieceLayers: ["near", "all", "off"], // own composited layers for paintings near the camera path / every one / none
+    layerHint: ["willChange", "translateZ"], // painting layers keep their largest raster (default) or re-raster after each move
+    maxPieceLayers: [0, 300], // cap on painting layers (default wallrender.js MAX_PIECE_LAYERS)
+    frameTex: ["auto", "900", "450", "300", "150"], // moulding level of detail picked per frame (auto) or one size
+    detailRes: "boolean", // false: the detail image laid out at the painting's size (blurrier while moving)
+    detailTiming: ["still", "early"], // the detail image placed and the next one fetched while still, or as before
+    glideImage: ["display", "wall"], // the next painting shows its ~1320 px display image for the glide, or its wall tier
+    coveringLayer: "boolean", // false: the covering painted into the wall's layer
+    coveringTile: ["seamless", "original"], // the seamless covering tiles (+ macro variation) or the website's
+    coveringRes: [1, 8], // the covering laid out this many times larger and scaled back down (sharper while moving)
+  };
+
+  function readRenderFlags(flags) {
+    if (!flags || typeof flags !== "object" || Array.isArray(flags)) return null;
+    var out = {};
+    for (var key in RENDER_FLAG_SPEC) {
+      if (!Object.prototype.hasOwnProperty.call(RENDER_FLAG_SPEC, key) || !(key in flags)) continue;
+      var spec = RENDER_FLAG_SPEC[key];
+      var value = flags[key];
+      if (spec === "boolean") {
+        if (typeof value !== "boolean") return null;
+      } else if (typeof spec[0] === "string") {
+        if (spec.indexOf(value) < 0) return null;
+      } else if (!isFiniteNumber(value) || value < spec[0] || value > spec[1]) {
+        return null;
+      }
+      out[key] = value;
+    }
+    return out;
+  }
+
   function isAllowedImageUrl(url) {
     if (typeof url !== "string") return false;
     for (var i = 0; i < ALLOWED_IMAGE_PREFIXES.length; i++) {
@@ -143,6 +192,104 @@
     return { texture: texture, mood: mood };
   }
 
+  // ─── Wall mode (receiver 2.9.0): LOAD_WALL + APPEND_WALL_PIECES (docs/design/2026-10-12-wall-on-tv.md) ───
+
+  /** A wall holds at most this many paintings (the account wall's limit); extra pieces are dropped. */
+  var MAX_WALL_PIECES = 300;
+  /** Wall coverings and rooms the TV page can draw (the website's wall-look.ts). Unknown ones fall back. */
+  var WALL_SKINS = ["damask", "plum", "navy", "teal", "limewash", "graphite"];
+  var WALL_ROOMS = ["gallery", "float"];
+  /** Frames the TV page can draw (lib/wall/types.ts FrameKind). An unknown frame is drawn as a bare canvas. */
+  var FRAME_KINDS = ["gold", "gilded", "cassetta", "acanthus", "venetian", "louis", "victorian", "ripple", "walnut",
+    "lacquer", "oak", "maple", "thin", "brass", "float", "canvas"];
+  /**
+   * Largest coordinate or size accepted, in wall points: the tallest wall the phone can build, with headroom.
+   * Anything bigger is garbage that would build an absurd page. Derived from the phone's layout
+   * (lib/wall/layout.ts, lib/wall/accountWall.ts; change together):
+   *  - the wall is 1000 points wide, so the narrowest wall (hallway, 250 cm) has the most points per cm: 4;
+   *  - Snap: MAX_WALL_PIECES rows of one painting each, 32 cm between rows, 44 cm above and 66 cm below;
+   *  - Free: centres at most 500 m down (FREE_BOUNDS.maxY), plus half a painting and the 66 cm below;
+   *  - a painting with its frame at most 5 m tall (realistic: almost every painting is far smaller).
+   * A living-room wall of 300 paintings of 100 x 140 cm is about 142,000 points tall; the worst case above about
+   * 639,000; times 1.5 headroom, rounded up: 1,000,000.
+   */
+  var WALL_POINTS_PER_CM_MAX = 1000 / 250;
+  var TALLEST_PIECE_CM = 500;
+  var TALLEST_SNAP_WALL_CM = MAX_WALL_PIECES * TALLEST_PIECE_CM + (MAX_WALL_PIECES - 1) * 32 + 44 + 66;
+  var TALLEST_FREE_WALL_CM = 50000 + TALLEST_PIECE_CM / 2 + 66;
+  var MAX_WALL_COORD =
+    Math.ceil((1.5 * WALL_POINTS_PER_CM_MAX * Math.max(TALLEST_SNAP_WALL_CM, TALLEST_FREE_WALL_CM)) / 100000) * 100000;
+
+  function isWallNumber(value) {
+    return isFiniteNumber(value) && Math.abs(value) <= MAX_WALL_COORD;
+  }
+
+  function readColour(value) {
+    var colour = typeof value === "string" && /^#[0-9a-fA-F]{3,8}$/.test(value) ? value : "#000000";
+    return colour.length === 9 ? "#" + colour.slice(3) : colour;
+  }
+
+  /**
+   * One painting on the wall: outer box (frame included, top-left, wall points), moulding band, texts, the small
+   * image for the wall, the large one for the close-up. Returns null when it cannot be drawn safely (no box, or
+   * no wall image on the KULTURA CDN). A detail image from anywhere else is dropped (no close-up, the wall image
+   * stays).
+   */
+  function readWallPiece(raw) {
+    if (!raw || typeof raw !== "object" || !isFiniteNumber(raw.id)) return null;
+    if (!isWallNumber(raw.x) || !isWallNumber(raw.y) || !isWallNumber(raw.w) || !isWallNumber(raw.h)) return null;
+    if (!(raw.w > 0 && raw.h > 0) || !isAllowedImageUrl(raw.wallImageUrl)) return null;
+    var band = isFiniteNumber(raw.band) && raw.band >= 0 ? Math.min(raw.band, Math.min(raw.w, raw.h) / 4) : 0;
+    var piece = {
+      id: raw.id,
+      frame: FRAME_KINDS.indexOf(raw.frame) >= 0 ? raw.frame : "canvas",
+      x: raw.x,
+      y: raw.y,
+      w: raw.w,
+      h: raw.h,
+      band: band,
+      title: shortText(raw.title, 200),
+      artist: shortText(raw.artist, 120),
+      date: shortText(raw.date, 40),
+      wallImageUrl: raw.wallImageUrl,
+      detailUrl: isAllowedImageUrl(raw.detailUrl) ? raw.detailUrl : null,
+      mainColor: readColour(raw.mainColor),
+      focus: readFocus(raw.focus),
+      poi: readPoi(raw.poi),
+    };
+    if (isAllowedImageUrl(raw.fallbackImageUrl) && raw.fallbackImageUrl !== piece.detailUrl) {
+      piece.fallbackImageUrl = raw.fallbackImageUrl;
+    }
+    return piece;
+  }
+
+  function readWallPieceList(list) {
+    if (!Array.isArray(list)) return [];
+    var clean = [];
+    for (var i = 0; i < list.length && clean.length < MAX_WALL_PIECES; i++) {
+      var piece = readWallPiece(list[i]);
+      if (piece) clean.push(piece);
+    }
+    return clean;
+  }
+
+  /** { w, h } of the wall covering in wall points, or null. */
+  function readSurface(value) {
+    if (!value || typeof value !== "object" || !isWallNumber(value.w) || !isWallNumber(value.h)) return null;
+    return value.w > 0 && value.h > 0 ? { w: value.w, h: value.h } : null;
+  }
+
+  /** { minX, minY, maxX, maxY } (everything there is to look at), or null when missing or inside out. */
+  function readBounds(value) {
+    if (!value || typeof value !== "object") return null;
+    var keys = ["minX", "minY", "maxX", "maxY"];
+    for (var i = 0; i < keys.length; i++) {
+      if (!isWallNumber(value[keys[i]])) return null;
+    }
+    if (!(value.maxX > value.minX && value.maxY > value.minY)) return null;
+    return { minX: value.minX, minY: value.minY, maxX: value.maxX, maxY: value.maxY };
+  }
+
   /**
    * Parse one incoming message into a validated command, or null to ignore it.
    * Accepts either a JSON string or an already-parsed object (the Cast SDK delivers both).
@@ -173,6 +320,30 @@
         var more = readArtworkList(data.artworks);
         return more.length > 0 ? { type: "APPEND_ARTWORKS", artworks: more } : null;
       }
+      case "LOAD_WALL": {
+        var wallId = readManifestId(data.wallId);
+        var surface = readSurface(data.surface);
+        var pieces = readWallPieceList(data.pieces);
+        if (!wallId || !surface || pieces.length === 0) return null;
+        var count = isFiniteNumber(data.pieceCount) ? Math.round(data.pieceCount) : pieces.length;
+        return {
+          type: "LOAD_WALL",
+          wallId: wallId,
+          sourceName: shortText(data.sourceName, SOURCE_NAME_MAX_LENGTH),
+          skin: WALL_SKINS.indexOf(data.skin) >= 0 ? data.skin : "damask",
+          room: WALL_ROOMS.indexOf(data.room) >= 0 ? data.room : "gallery",
+          surface: surface,
+          bounds: readBounds(data.bounds),
+          pieceCount: Math.max(pieces.length, Math.min(MAX_WALL_PIECES, count)),
+          pieces: pieces,
+        };
+      }
+      case "APPEND_WALL_PIECES": {
+        var appendTo = readManifestId(data.wallId);
+        var morePieces = readWallPieceList(data.pieces);
+        if (!appendTo || morePieces.length === 0) return null;
+        return { type: "APPEND_WALL_PIECES", wallId: appendTo, pieces: morePieces };
+      }
       case "SET_SETTINGS": {
         var seconds = readSeconds(data.secondsPerArtwork);
         var backdrop = readBackdrop(data.backdrop);
@@ -188,6 +359,11 @@
       // debug mode: page URL with ?debug, or after DEBUG_MODE {enabled: true} in this session.
       case "DEBUG_MODE":
         return typeof data.enabled === "boolean" ? { type: "DEBUG_MODE", enabled: data.enabled } : null;
+      case "RENDER_FLAGS": {
+        // Test-only (acted on in debug mode only). {} returns to the normal look; one invalid value drops it all.
+        var renderFlags = readRenderFlags(data.flags);
+        return renderFlags ? { type: "RENDER_FLAGS", flags: renderFlags } : null;
+      }
       case "SEEK":
         if (!isFiniteNumber(data.timeMs) || data.timeMs < 0 || data.timeMs > MAX_SECONDS * 1000) return null;
         return { type: "SEEK", timeMs: data.timeMs, pause: data.pause === true };
@@ -209,8 +385,14 @@
     DEFAULT_SECONDS: DEFAULT_SECONDS,
     MIN_SECONDS: MIN_SECONDS,
     MAX_SECONDS: MAX_SECONDS,
+    MAX_WALL_PIECES: MAX_WALL_PIECES,
+    MAX_WALL_COORD: MAX_WALL_COORD,
+    WALL_SKINS: WALL_SKINS,
+    FRAME_KINDS: FRAME_KINDS,
+    RENDER_FLAG_SPEC: RENDER_FLAG_SPEC,
     isAllowedImageUrl: isAllowedImageUrl,
     readArtwork: readArtwork,
+    readWallPiece: readWallPiece,
     parseMessage: parseMessage,
   };
 

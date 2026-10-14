@@ -14,11 +14,20 @@
  *
  * Geometry lives in motion.js, message validation in protocol.js; both are unit-tested.
  * The message protocol is defined on the phone side in types/cast.ts.
+ *
+ * Wall mode (2.9.0, docs/design/2026-10-12-wall-on-tv.md): LOAD_WALL (+ APPEND_WALL_PIECES) leaves the
+ * slideshow and plays a camera tour of the person's wall (planned in walltour.js, drawn by wallview.js);
+ * LOAD_MANIFEST leaves the wall for the slideshow. The remote commands, settings, auto-stop and the test-only
+ * SEEK work in both modes; in wall mode STATUS counts painting stops.
+ *
+ * OLED burn-in safeguard (2.9.0, rules and numbers in idle.js): a wall paused for a minute drifts very slowly
+ * (syncOledDrift), a paused wall stops after 10 minutes, and a test-only freeze (SEEK pause) plays on by itself
+ * after 3 minutes (armDebugFreeze).
  */
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.8.0";
+  var RECEIVER_VERSION = "2.9.0";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**
@@ -50,6 +59,12 @@
   var Telemetry = window.KulturaTelemetry;
   /** When the page stops by itself (idle, paused, unattended): idle.js. */
   var Idle = window.KulturaIdle;
+  var WallView = window.KulturaWallView;
+  /**
+   * Wall mode: the tour starts once all the pieces a LOAD_WALL announced have arrived, or after this long with
+   * the ones that came (a lost APPEND_WALL_PIECES never leaves the TV waiting).
+   */
+  var WALL_ASSEMBLY_WAIT_MS = 10000;
 
   // ─── DOM refs ───
   var layers = { a: document.getElementById("layer-a"), b: document.getElementById("layer-b") };
@@ -85,6 +100,8 @@
    * never sends either. See protocol.js.
    */
   var debugMode = /[?&]debug\b/.test(window.location.search || "");
+  /** Test-only wall render switches (RENDER_FLAGS, debug mode only; protocol.js RENDER_FLAG_SPEC). Kept for the session. */
+  var renderFlags = {};
   /** Incremented per transition, so a late cleanup never hides a layer that has become active again. */
   var transitionToken = 0;
   var activeLayerId = "a";
@@ -107,6 +124,30 @@
   var autoStoppedReason = null;
   var loadingIndicatorTimer = null;
   var pausedTextTimer = null;
+  /** "slideshow" (LOAD_MANIFEST) or "wall" (LOAD_WALL). */
+  var mode = "slideshow";
+  /**
+   * The wall being received or played: { wallId, command (validated LOAD_WALL), pieces, ids, ownerSenderId,
+   * started } or null. Its pieces are drawn by `wallView`.
+   */
+  var wallState = null;
+  var wallAssemblyTimer = null;
+  var wallView = null;
+  /**
+   * OLED drift (idle.js oledDriftDue / oledDriftTransform): when the paused wall last stopped moving (the pause,
+   * a NEXT / PREVIOUS while paused, a test SEEK), and the drift on the wall stage while it runs:
+   * { startedAt, scaleIn (the 2 % scale-in animation, null once done), transform (static, after the scale-in) }.
+   */
+  var wallStillSince = null;
+  var oledDrift = null;
+  var oledDriftTimer = null;
+  /** The drift's static transform is re-checked this often; it changes about once per device px (every few s). */
+  var OLED_DRIFT_TICK_MS = 1000;
+  /** Back from the drift to the tour's own framing on resume. */
+  var OLED_DRIFT_RETURN_MS = 1000;
+  /** Test-only freeze: the last SEEK with pause: true (null when none is in force), and its release timer. */
+  var debugFrozenSince = null;
+  var debugFreezeTimer = null;
 
   function setPhase(phase) {
     slidePhase = phase;
@@ -127,8 +168,13 @@
   var wakeLock = null;
   var wakeLockStatus = navigator.wakeLock ? "not requested" : "unsupported";
 
+  /** Something to show: a slideshow list, or a wall (received or playing). */
+  function hasContent() {
+    return mode === "wall" ? wallState != null : artworks.length > 0;
+  }
+
   function requestWakeLock() {
-    if (!navigator.wakeLock || wakeLock || artworks.length === 0 || document.visibilityState !== "visible") return;
+    if (!navigator.wakeLock || wakeLock || !hasContent() || document.visibilityState !== "visible") return;
     navigator.wakeLock.request("screen").then(
       function (lock) {
         wakeLock = lock;
@@ -244,12 +290,17 @@
     var anim = slideAnimations && slideAnimations.clock;
     var slide = slideDiagnostics();
     return {
+      mode: mode,
+      // Wall mode (2.9.0): the tour's stop, camera, detail layer and memory (scripts/tv_capture.py --wall).
+      wall: mode === "wall" && wallView ? wallView.diagnostics() : null,
       phase: slidePhase,
       artworkId: currentSlide ? currentSlide.artwork.id : null,
       image: slide.image,
       motion: slide.motion,
       transitionMs: Motion.TRANSITION_MS,
       debugMode: debugMode,
+      renderFlags: renderFlags,
+      oled: oledDiagnostics(),
       frameMs: frameTimeStats(),
       phaseMs: Date.now() - phaseStartedAt,
       preparing: isPreparing,
@@ -290,21 +341,49 @@
     }
   }
 
+  /**
+   * Where the TV is: { index, count, current: { id, title } | null, sourceName }. In wall mode index / count
+   * count painting stops (the tour's reading order), so the phone's "3 of 40" and NEXT / PREVIOUS mean the same.
+   */
+  function position() {
+    if (mode === "wall") {
+      var at = wallView && wallState && wallState.started ? wallView.position() : null;
+      return {
+        index: at ? at.index : 0,
+        count: at ? at.count : wallState ? wallState.pieces.length : 0,
+        current: at ? { id: at.pieceId, title: at.title } : null,
+        sourceName: wallState ? wallState.command.sourceName : "",
+      };
+    }
+    var artwork = artworks[currentIndex] || null;
+    return {
+      index: currentIndex,
+      count: artworks.length,
+      current: artwork ? { id: artwork.id, title: artwork.title } : null,
+      sourceName: sourceName,
+    };
+  }
+
   function sendStatus() {
     if (!castContext) return;
-    var artwork = artworks[currentIndex] || null;
+    var at = position();
     var status = {
       type: "STATUS",
       protocol: Protocol.PROTOCOL_VERSION,
       receiverVersion: RECEIVER_VERSION,
-      currentIndex: currentIndex,
+      // 2.9.0: which mode plays, the wall's id (like manifestId), and index / count (painting stops in wall mode).
+      mode: mode,
+      wallId: mode === "wall" && wallState ? wallState.wallId : null,
+      index: at.index,
+      count: at.count,
+      currentIndex: at.index,
       isPaused: isPaused,
-      totalArtworks: artworks.length,
-      currentArtwork: artwork ? { id: artwork.id, title: artwork.title } : null,
+      totalArtworks: at.count,
+      currentArtwork: at.current,
       secondsPerArtwork: secondsPerArtwork,
-      sourceName: sourceName,
+      sourceName: at.sourceName,
       // Echo of the phone's LOAD_MANIFEST id (null for a list sent without one, e.g. an older phone).
-      manifestId: playlist.manifestId,
+      manifestId: mode === "slideshow" ? playlist.manifestId : null,
       backdrop: { texture: backdropTexture, mood: backdropMood },
       motion: motionMode,
       // 2.8.0: how many phones are connected, so a phone offers "Disconnect" (TV keeps playing for the
@@ -410,8 +489,10 @@
 
   /** Put a tag in the lower corner opposite the wall label on screen (labels alternate corners). */
   function placeIndicator(el) {
-    var label = layers[activeLayerId].querySelector(".metadata-overlay");
-    el.classList.toggle("on-left", label.classList.contains("label-right"));
+    var labelRight = mode === "wall" && wallView
+      ? wallView.captionOnRight()
+      : layers[activeLayerId].querySelector(".metadata-overlay").classList.contains("label-right");
+    el.classList.toggle("on-left", labelRight);
   }
 
   /** Small "Loading <title>" tag, only once a painting is slow to appear (see the delay above). */
@@ -436,14 +517,16 @@
 
   /** "Paused · 3 of 40 · KULTURA" while paused with a painting on screen; the text fades, the icon stays. */
   function renderPausedIndicator() {
-    var show = isPaused && currentSlide != null && artworks.length > 0;
+    var onScreen = mode === "wall" ? !!(wallState && wallState.started) : currentSlide != null && artworks.length > 0;
+    var show = isPaused && onScreen;
     if (!show) {
       clearTimeout(pausedTextTimer);
       pausedTextTimer = null;
       pausedIndicator.classList.add("hidden");
       return;
     }
-    pausedPosition.textContent = currentIndex + 1 + " of " + artworks.length;
+    var at = position();
+    pausedPosition.textContent = at.index + 1 + " of " + at.count;
     placeIndicator(pausedIndicator);
     if (!pausedIndicator.classList.contains("hidden")) return; // already showing: keep its fade state
     pausedIndicator.classList.remove("quiet");
@@ -723,11 +806,17 @@
 
   function setPaused(paused) {
     resetAnimationWatchdog();
-    if (paused && !isPaused) pausedSince = Date.now();
+    if (paused && !isPaused) {
+      pausedSince = Date.now();
+      wallStillSince = pausedSince;
+    }
     if (!paused) pausedSince = null;
     isPaused = paused;
     renderPausedIndicator();
-    if (slideAnimations) {
+    if (mode === "wall") {
+      if (wallView) wallView.setPaused(paused);
+      syncOledDrift();
+    } else if (slideAnimations) {
       if (paused) {
         slideAnimations.clock.pause();
         slideAnimations.caption.pause();
@@ -759,7 +848,119 @@
    * changes never come through here, so they never keep a forgotten paused TV awake.
    */
   function restartPausedClock() {
-    if (isPaused) pausedSince = Date.now();
+    if (!isPaused) return;
+    pausedSince = Date.now();
+    wallStillSince = pausedSince; // the camera glides to the next stop: the drift waits a minute again
+    syncOledDrift();
+  }
+
+  // ─── OLED safeguard (idle.js) ───
+
+  /** The wall's paused stillness clock: null unless a started wall is paused. */
+  function wallStillClock() {
+    return mode === "wall" && isPaused && wallState && wallState.started ? wallStillSince : null;
+  }
+
+  /**
+   * Start, advance or stop the drift of the paused wall. Called on every pause / resume / jump / SEEK / wall
+   * change, and by its own timer while it is due or pending. The drift is a static transform on #wall-stage
+   * (created by wallview.js), so the still picture stays sharp; only its first minute is a compositor animation
+   * (the 2 % scale-in, too slow to see). The pause icon (outside the stage) moves with the offset.
+   */
+  function syncOledDrift() {
+    clearTimeout(oledDriftTimer);
+    oledDriftTimer = null;
+    var now = Date.now();
+    var stillSince = wallStillClock();
+    var stage = document.getElementById("wall-stage");
+    if (!stage || !Idle.oledDriftDue({ now: now, mode: mode, stillSince: stillSince })) {
+      // Smooth only when the tour plays on; a paused jump or a test SEEK resets at once (exact test frames).
+      stopOledDrift(mode === "wall" && !isPaused);
+      if (stage && stillSince != null) oledDriftTimer = setTimeout(syncOledDrift, Math.max(0, stillSince + Idle.OLED_DRIFT_START_MS - now));
+      return;
+    }
+    if (!oledDrift) {
+      oledDrift = {
+        startedAt: now,
+        scaleIn: stage.animate(Idle.oledDriftScaleInKeyframes(), { duration: Idle.OLED_DRIFT_SCALE_IN_MS, fill: "forwards" }),
+        transform: null,
+        x: 0,
+        y: 0,
+      };
+    }
+    var elapsed = now - oledDrift.startedAt;
+    if (elapsed >= Idle.OLED_DRIFT_SCALE_IN_MS) {
+      var drift = Idle.oledDriftTransform(elapsed, window.devicePixelRatio || 1);
+      if (drift.transform !== oledDrift.transform) {
+        stage.style.transform = drift.transform;
+        pausedIndicator.style.transform = "translate(" + drift.x + "px, " + drift.y + "px)";
+        oledDrift.transform = drift.transform;
+        oledDrift.x = drift.x;
+        oledDrift.y = drift.y;
+      }
+      // The static transform is in place (same value as the animation's end): the animation can go.
+      if (oledDrift.scaleIn) {
+        oledDrift.scaleIn.cancel();
+        oledDrift.scaleIn = null;
+      }
+    }
+    oledDriftTimer = setTimeout(syncOledDrift, OLED_DRIFT_TICK_MS);
+  }
+
+  /** Remove the drift (the wall back at the tour's own framing); `smooth`: over a second instead of at once. */
+  function stopOledDrift(smooth) {
+    if (!oledDrift) return;
+    var stage = document.getElementById("wall-stage");
+    var from = stage && smooth ? getComputedStyle(stage).transform : "";
+    if (oledDrift.scaleIn) oledDrift.scaleIn.cancel();
+    oledDrift = null;
+    pausedIndicator.style.transform = "";
+    if (!stage) return;
+    stage.style.transform = "";
+    if (from && from !== "none") {
+      stage.animate([{ transform: from }, { transform: "none" }], { duration: OLED_DRIFT_RETURN_MS, easing: "ease-out" });
+    }
+  }
+
+  /** A test-only freeze (SEEK with pause: true) plays on by itself after DEBUG_FREEZE_RELEASE_MS; a new SEEK restarts it. */
+  function armDebugFreeze() {
+    clearTimeout(debugFreezeTimer);
+    debugFrozenSince = Date.now();
+    debugFreezeTimer = setTimeout(releaseDebugFreeze, Idle.DEBUG_FREEZE_RELEASE_MS);
+  }
+
+  /** A real PAUSE / RESUME, a SEEK that plays, or a new list or wall takes over from a test freeze. */
+  function clearDebugFreeze() {
+    clearTimeout(debugFreezeTimer);
+    debugFreezeTimer = null;
+    debugFrozenSince = null;
+  }
+
+  function releaseDebugFreeze() {
+    var now = Date.now();
+    if (debugFrozenSince == null) return;
+    if (!Idle.debugFreezeReleaseDue({ now: now, frozenSince: debugFrozenSince })) {
+      debugFreezeTimer = setTimeout(releaseDebugFreeze, debugFrozenSince + Idle.DEBUG_FREEZE_RELEASE_MS - now);
+      return;
+    }
+    clearDebugFreeze();
+    console.log("[KULTURA] test freeze released after " + Idle.DEBUG_FREEZE_RELEASE_MS / 60000 + " min");
+    if (isPaused) setPaused(false);
+  }
+
+  /** STATUS.debug.oled: the drift, and when the paused stop, the drift and a test freeze are due (ms from now). */
+  function oledDiagnostics() {
+    var now = Date.now();
+    var stillSince = wallStillClock();
+    return {
+      driftActive: oledDrift != null,
+      driftMs: oledDrift ? now - oledDrift.startedAt : null,
+      driftScalingIn: !!(oledDrift && oledDrift.scaleIn),
+      driftOffsetPx: oledDrift ? { x: oledDrift.x, y: oledDrift.y } : null,
+      driftStartsInMs: !oledDrift && stillSince != null ? Math.max(0, stillSince + Idle.OLED_DRIFT_START_MS - now) : null,
+      pausedStopInMs: isPaused && pausedSince != null ? Math.max(0, pausedSince + Idle.pausedStopMs(mode) - now) : null,
+      debugFreezeReleaseInMs: debugFrozenSince != null ? Math.max(0, debugFrozenSince + Idle.DEBUG_FREEZE_RELEASE_MS - now) : null,
+    };
   }
 
   /**
@@ -773,8 +974,19 @@
     lastActivity = Date.now();
 
     switch (command.type) {
+      case "LOAD_WALL":
+        startWall(command, senderId);
+        break;
+      case "APPEND_WALL_PIECES":
+        appendWallPieces(command, senderId);
+        break;
       case "LOAD_MANIFEST":
       case "APPEND_ARTWORKS": {
+        if (mode === "wall") {
+          // A list's leftover batch never ends a wall; a new list does.
+          if (command.type === "APPEND_ARTWORKS") return;
+          leaveWall();
+        }
         var result = Playlist.applyManifestCommand(playlist, command, senderId);
         if (!result) {
           console.log("[KULTURA] ignoring " + command.type + " from a sender whose list was replaced");
@@ -785,6 +997,7 @@
         sourceName = playlist.sourceName;
         if (result.restart) {
           if (command.secondsPerArtwork) secondsPerArtwork = command.secondsPerArtwork;
+          clearDebugFreeze();
           isPaused = false;
           pausedSince = null;
           nothingToShowSince = null;
@@ -805,21 +1018,27 @@
         }
         // Applies from the next artwork: the one on screen finishes its own choreography.
         if (command.motion) motionMode = command.motion;
+        if (wallView) wallView.setSettings({ seconds: command.secondsPerArtwork, motion: command.motion });
         if (command.secondsPerArtwork) setSecondsPerArtwork(command.secondsPerArtwork);
         else sendStatus();
         break;
       case "NEXT":
-        restartPausedClock();
-        showArtwork(currentIndex + 1);
-        break;
       case "PREVIOUS":
         restartPausedClock();
-        showArtwork(currentIndex - 1);
+        if (mode === "wall") {
+          if (command.type === "NEXT") wallView.next();
+          else wallView.previous();
+          sendStatus();
+        } else {
+          showArtwork(currentIndex + (command.type === "NEXT" ? 1 : -1));
+        }
         break;
       case "PAUSE":
+        clearDebugFreeze();
         setPaused(true);
         break;
       case "RESUME":
+        clearDebugFreeze();
         setPaused(false);
         break;
       case "GET_STATUS":
@@ -829,9 +1048,33 @@
         debugMode = command.enabled;
         sendStatus();
         break;
+      case "RENDER_FLAGS":
+        // Test-only (scripts/cast_dev_sender.py render-flags, tv_motion_probe.py --render-flags).
+        if (!debugMode) return;
+        renderFlags = command.flags;
+        ensureWallView().setRenderFlags(renderFlags);
+        sendStatus();
+        break;
       case "SEEK":
-        // Test-only (tv_capture.py): jump the slide on screen to an exact animation time.
-        if (!debugMode || !slideAnimations) return;
+        // Test-only (tv_capture.py): jump the slide (wall mode: the stop) on screen to an exact time.
+        if (!debugMode) return;
+        // A freeze releases itself after 3 minutes (idle.js DEBUG_FREEZE_RELEASE_MS); each SEEK restarts that clock.
+        if (mode === "wall") {
+          if (!wallState || !wallState.started) return;
+          if (command.pause) armDebugFreeze();
+          else clearDebugFreeze();
+          wallView.seek(command.timeMs);
+          if (command.pause) wallStillSince = Date.now(); // an exact test frame: no drift for a minute
+          if (command.pause !== isPaused) setPaused(command.pause);
+          else {
+            syncOledDrift();
+            sendStatus();
+          }
+          return;
+        }
+        if (!slideAnimations) return;
+        if (command.pause) armDebugFreeze();
+        else clearDebugFreeze();
         resetAnimationWatchdog();
         slideAnimations.clock.currentTime = command.timeMs;
         slideAnimations.caption.currentTime = command.timeMs;
@@ -842,6 +1085,137 @@
         }
         break;
     }
+  }
+
+  // ─── Wall mode ───
+
+  /**
+   * Stop the slideshow without a trace: no pending load, animation or timer of it may touch the screen while the
+   * wall plays (its layers are hidden; a later LOAD_MANIFEST starts it again from a clean list). Its two large
+   * images are released (memory for the wall); the next slide swaps a freshly loaded image in (startSlide).
+   */
+  function leaveSlideshow() {
+    slideToken++;
+    transitionToken++;
+    if (slideAnimations) clearTimeout(slideAnimations.moveTimer);
+    slideAnimations = null;
+    currentSlide = null;
+    [layers.a, layers.b].forEach(function (layer) {
+      var img = layer.querySelector(".artwork-image");
+      [layer, layer.querySelector(".layer-art"), img, layer.querySelector(".metadata-overlay")].forEach(cancelAnimations);
+      if (img) img.removeAttribute("src");
+      layer.classList.remove("active");
+      layer.style.opacity = "0";
+    });
+    hideLoadingIndicator();
+    playlist = { artworks: [], sourceName: "", manifestId: null, ownerSenderId: null, generation: playlist.generation + 1 };
+    artworks = playlist.artworks;
+    sourceName = playlist.sourceName;
+    currentIndex = 0;
+    setPhase("idle");
+  }
+
+  function leaveWall() {
+    clearTimeout(wallAssemblyTimer);
+    wallAssemblyTimer = null;
+    stopOledDrift(false);
+    clearTimeout(oledDriftTimer);
+    oledDriftTimer = null;
+    if (wallView) wallView.destroy();
+    wallState = null;
+    mode = "slideshow";
+  }
+
+  function ensureWallView() {
+    if (wallView) return wallView;
+    wallView = WallView.create({
+      parent: document.body,
+      before: idleScreen,
+      loadImage: loadImage,
+      onStop: function () {
+        renderPausedIndicator();
+        sendStatus();
+      },
+      onStarted: function () {
+        wallState.started = true;
+        isPreparing = false;
+        nothingToShowSince = null;
+        setPhase("playing");
+        idleScreen.classList.add("hidden");
+        requestWakeLock();
+        renderPausedIndicator();
+        // Paused while the pieces arrived: the wall is first still from now.
+        if (isPaused) wallStillSince = Date.now();
+        syncOledDrift();
+        sendStatus();
+      },
+    });
+    wallView.setRenderFlags(renderFlags);
+    return wallView;
+  }
+
+  /** LOAD_WALL: leave whatever plays, show "Preparing your wall", and wait for the pieces still to come. */
+  function startWall(command, senderId) {
+    if (mode === "wall") leaveWall();
+    else leaveSlideshow();
+    mode = "wall";
+    ensureWallView();
+    wallState = {
+      wallId: command.wallId,
+      command: command,
+      pieces: [],
+      ids: {},
+      ownerSenderId: senderId == null ? null : String(senderId),
+      started: false,
+      built: false,
+    };
+    addWallPieces(command.pieces);
+    clearDebugFreeze();
+    isPaused = false;
+    pausedSince = null;
+    nothingToShowSince = null;
+    renderPausedIndicator();
+    isPreparing = true;
+    showIdle("Preparing your wall", command.sourceName, true);
+    if (wallState.pieces.length >= command.pieceCount) buildWall();
+    else wallAssemblyTimer = setTimeout(buildWall, WALL_ASSEMBLY_WAIT_MS);
+    sendStatus();
+  }
+
+  /** Pieces of the wall being received: duplicates and anything past MAX_WALL_PIECES are dropped. */
+  function addWallPieces(pieces) {
+    for (var i = 0; i < pieces.length && wallState.pieces.length < Protocol.MAX_WALL_PIECES; i++) {
+      if (wallState.ids[pieces[i].id]) continue;
+      wallState.ids[pieces[i].id] = true;
+      wallState.pieces.push(pieces[i]);
+    }
+  }
+
+  /**
+   * APPEND_WALL_PIECES: only for the wall being received, from the phone that sent it (as APPEND_ARTWORKS), and
+   * only before the tour is built; later batches are ignored (the tour does not re-plan under the viewer).
+   */
+  function appendWallPieces(command, senderId) {
+    var sender = senderId == null ? null : String(senderId);
+    if (mode !== "wall" || !wallState || wallState.wallId !== command.wallId || wallState.built) return;
+    if (wallState.ownerSenderId != null && sender != null && wallState.ownerSenderId !== sender) return;
+    addWallPieces(command.pieces);
+    if (wallState.pieces.length >= wallState.command.pieceCount) buildWall();
+    else sendStatus();
+  }
+
+  function buildWall() {
+    clearTimeout(wallAssemblyTimer);
+    wallAssemblyTimer = null;
+    if (mode !== "wall" || !wallState || wallState.built) return;
+    wallState.built = true;
+    var wall = {};
+    for (var key in wallState.command) wall[key] = wallState.command[key];
+    wall.pieces = wallState.pieces;
+    wallView.load(wall, currentView(), window.devicePixelRatio || 1, { seconds: secondsPerArtwork, motion: motionMode });
+    // A PAUSE that came while the pieces were arriving holds the tour at its first frame.
+    wallView.setPaused(isPaused);
+    sendStatus();
   }
 
   // ─── TV remote ───
@@ -865,13 +1239,13 @@
     lastKey = event.key + "/" + event.keyCode;
     lastActivity = Date.now();
     var action = REMOTE_KEYS[event.key];
-    if (!action || artworks.length === 0) return;
+    if (!action || !hasContent()) return;
     event.preventDefault();
     if (action === "TOGGLE_PAUSE") action = isPaused ? "RESUME" : "PAUSE";
     handleMessage({ type: action });
   });
 
-  // ─── Auto-stop (idle.js: 5 min with nothing to show, 20 min paused, 3 h unattended) ───
+  // ─── Auto-stop (idle.js: 5 min with nothing to show, 20 min paused (a wall: 10 min), 3 h unattended) ───
   setInterval(function () {
     if (autoStoppedReason) return;
     var reason = Idle.autoStopReason({
@@ -879,6 +1253,7 @@
       nothingToShowSince: nothingToShowSince,
       pausedSince: isPaused ? pausedSince : null,
       lastActivity: lastActivity,
+      mode: mode,
     });
     if (!reason) return;
     autoStoppedReason = reason;
@@ -974,7 +1349,7 @@
   showIdle("Preparing your gallery", "", true);
   // A phone that connects without sending a list (e.g. from the Cast button alone): say what to do.
   setTimeout(function () {
-    if (artworks.length > 0 || isPreparing || slidePhase !== "idle") return;
+    if (artworks.length > 0 || isPreparing || slidePhase !== "idle" || mode === "wall") return;
     showIdle("Choose artworks in the KULTURA app to show them here", "", false);
   }, WAITING_FOR_LIST_MS);
 
@@ -993,10 +1368,13 @@
         preparing: isPreparing,
         idleText: idleScreen.classList.contains("hidden") ? null : idleSubtitle.textContent + " | " + idleSource.textContent,
         idleSpinner: !idleScreen.classList.contains("hidden") && idleScreen.classList.contains("loading"),
+        mode: mode,
+        wall: mode === "wall" && wallView ? wallView.diagnostics() : null,
         loadingIndicator: loadingIndicator.classList.contains("hidden") ? null : loadingTitle.textContent,
         pausedIndicator: pausedIndicator.classList.contains("hidden") ? null : pausedIndicator.textContent.replace(/\s+/g, " ").trim(),
         pausedTextFaded: pausedIndicator.classList.contains("quiet"),
         autoStoppedReason: autoStoppedReason,
+        oled: oledDiagnostics(),
         progress: slideAnimations ? slideAnimations.clock.currentTime / slideDurationMs() : null,
       };
     },
