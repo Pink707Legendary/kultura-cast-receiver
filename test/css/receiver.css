@@ -362,14 +362,21 @@ html, body {
 }
 
 .rf-css-shadows .wp[data-frame="canvas"] .wp-shadow {
+  width: calc(100% - var(--band)) !important;
+  height: calc(100% - var(--band)) !important;
   box-shadow: calc(16 * var(--u)) calc(30 * var(--u)) calc(38 * var(--u)) calc(-10 * var(--u)) rgba(0, 0, 0, 0.72),
     calc(5 * var(--u)) calc(9 * var(--u)) calc(14 * var(--u)) rgba(0, 0, 0, 0.42);
 }
 
-/* The painting itself; its main colour shows until (or instead of) the small image (memory budget). */
+/* The painting itself; its main colour shows until (or instead of) the small image (memory budget).
+   Its backing: one layout px of the moulding's dark inner edge just outside the face, hidden under the frame. Chrome
+   draws a border (moulding or canvas side edge) at whole device px, up to one thinner than --band, and the border
+   stays on its outer line: without the backing a hairline of wall showed between the painting and its frame, wider
+   when the camera is close (Sony, 2026-10-15). A canvas's backing is its side edge, right and below (wallview.js). */
 .wp-canvas {
   position: absolute;
   overflow: hidden;
+  box-shadow: 0 0 0 1px #0d0c0b;
 }
 
 /* An image taken back (memory budget) or failed shows the painting's colour, never a broken-image icon. */

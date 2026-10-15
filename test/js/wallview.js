@@ -210,8 +210,12 @@
         node.style.width = px(p.w * L);
         node.style.height = px(p.h * L);
         node.style.setProperty("--band", px(p.drawnBand * L));
+        var isCanvas = p.frame === "canvas";
         var shadow = el("div", "wp-shadow", node);
-        applyShadow(shadow, p.frame === "canvas" ? "canvas" : "frame", p.w / WEBSITE_PX_PT, p.h / WEBSITE_PX_PT, uPx);
+        // A canvas casts its shadow from its face and side edge only (as the phone does): its outermost band is empty
+        // wall, and a shadow around the whole box left a strip of bare wall between the side edge and the shadow.
+        var shadowInset = isCanvas ? p.drawnBand : 0;
+        applyShadow(shadow, isCanvas ? "canvas" : "frame", (p.w - shadowInset) / WEBSITE_PX_PT, (p.h - shadowInset) / WEBSITE_PX_PT, uPx);
         var canvas = el("div", "wp-canvas", node);
         canvas.style.left = px((p.inner.x - p.x) * L);
         canvas.style.top = px((p.inner.y - p.y) * L);
@@ -225,9 +229,11 @@
         applyShadow(lip, Render.lipKind(p.frame), p.inner.w / WEBSITE_PX_PT, p.inner.h / WEBSITE_PX_PT, uPx);
         var frame = el("div", "wp-frame", node);
         frame.setAttribute("data-frame", p.frame);
-        if (p.frame === "canvas") {
+        if (isCanvas) {
           var side = mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE);
           frame.style.borderColor = side + " " + side + " " + mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE * 0.67);
+          // The face's backing (receiver.css .wp-canvas) is the side edge's colour, on the right and below only.
+          canvas.style.boxShadow = "1px 1px 0 " + side;
         }
         pieceEls[p.index] = { node: node, frame: frame, img: img, src: null, lod: null, layer: false, hold: false, rasterZoom: 0 };
         img.onerror = function () {

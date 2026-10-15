@@ -23,11 +23,18 @@
  * OLED burn-in safeguard (2.9.0, rules and numbers in idle.js): a wall paused for a minute drifts very slowly
  * (syncOledDrift), a paused wall stops after 10 minutes, and a test-only freeze (SEEK pause) plays on by itself
  * after 3 minutes (armDebugFreeze).
+ *
+ * 2.10.0 (test app 2636BA72 only until published): stop framing v2 (the painting dominates, neighbours as
+ * hints) and the spotlight at stops (RENDER_FLAGS "spotlight", "spotlightStrength"). The live root stays 2.9.0
+ * = cast-receiver at main eaf5bd8 until a 2.10.0 root publish.
+ *
+ * 2.10.1: no hairline of wall between a painting and its frame or canvas edge (receiver.css .wp-canvas backing), and
+ * a canvas's shadow starts at its side edge, not one band further out (wallview.js buildWall).
  */
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.9.0";
+  var RECEIVER_VERSION = "2.10.1";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**
