@@ -28,13 +28,14 @@
  * hints) and the spotlight at stops (RENDER_FLAGS "spotlight", "spotlightStrength"). The live root stays 2.9.0
  * = cast-receiver at main eaf5bd8 until a 2.10.0 root publish.
  *
- * 2.10.1: no hairline of wall between a painting and its frame or canvas edge (receiver.css .wp-canvas backing), and
- * a canvas's shadow starts at its side edge, not one band further out (wallview.js buildWall).
+ * 2.10.2: no hairline of wall between a painting and its frame or canvas edge (receiver.css .wp-canvas backing), and
+ * a canvas's shadow starts at its side edge, not one band further out (wallview.js buildWall). 2.10.1 (test only)
+ * was the same with a 1 px backing: a faint trace stayed on the Sony.
  */
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.10.1";
+  var RECEIVER_VERSION = "2.10.2";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**

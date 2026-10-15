@@ -233,7 +233,7 @@
           var side = mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE);
           frame.style.borderColor = side + " " + side + " " + mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE * 0.67);
           // The face's backing (receiver.css .wp-canvas) is the side edge's colour, on the right and below only.
-          canvas.style.boxShadow = "1px 1px 0 " + side;
+          canvas.style.boxShadow = "1px 1px 0 1px " + side;
         }
         pieceEls[p.index] = { node: node, frame: frame, img: img, src: null, lod: null, layer: false, hold: false, rasterZoom: 0 };
         img.onerror = function () {
