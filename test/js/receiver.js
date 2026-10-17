@@ -31,11 +31,15 @@
  * 2.10.2: no hairline of wall between a painting and its frame or canvas edge (receiver.css .wp-canvas backing), and
  * a canvas's shadow starts at its side edge, not one band further out (wallview.js buildWall). 2.10.1 (test only)
  * was the same with a 1 px backing: a faint trace stayed on the Sony.
+ *
+ * 2.10.3: Disconnect on a phone no longer closes the page (Google's framework stops a receiver when its last
+ * sender leaves on purpose; setLastSenderDisconnectedHandler keeps it playing, idle.js still lets the TV sleep),
+ * and STATUS.connectedSenders counts phones, not connections (an Android phone opens two, one of them silent).
  */
 (function () {
   "use strict";
 
-  var RECEIVER_VERSION = "2.10.2";
+  var RECEIVER_VERSION = "2.10.3";
   var NAMESPACE = "urn:x-cast:art.kultura.cast";
   var PRELOAD_AHEAD = 2;
   /**
@@ -119,6 +123,12 @@
   var slideAnimations = null;
   var consecutiveLoadFailures = 0;
   var castContext = null;
+  /**
+   * Senders that have sent a message on the KULTURA namespace: one per phone. Google Play services also opens a
+   * silent connection for every Android phone (its media route; Galaxy test 2026-10-17: two senders per phone),
+   * which never speaks our namespace, so counting getSenders() alone said "another phone is connected".
+   */
+  var talkingSenderIds = {};
   /** For diagnostics in STATUS: "idle" | "loading" | "playing" | "failed". */
   var slidePhase = "idle";
   var phaseStartedAt = Date.now();
@@ -339,11 +349,19 @@
 
   // ─── Status back to the phone(s) ───
 
-  /** Phones connected to this TV page right now (null outside a Cast session, e.g. dev.html). */
+  /**
+   * Phones connected to this TV page right now: connected senders that have talked to us (talkingSenderIds).
+   * Null outside a Cast session (e.g. dev.html). A phone counts from its first message (every KULTURA phone asks
+   * GET_STATUS as soon as its channel opens).
+   */
   function connectedSenderCount() {
     if (!castContext || typeof castContext.getSenders !== "function") return null;
     try {
-      return castContext.getSenders().length;
+      var count = 0;
+      castContext.getSenders().forEach(function (sender) {
+        if (sender && talkingSenderIds[String(sender.id)]) count++;
+      });
+      return count;
     } catch (e) {
       return null;
     }
@@ -1331,6 +1349,7 @@
     }
     castContext = cast.framework.CastReceiverContext.getInstance();
     castContext.addCustomMessageListener(NAMESPACE, function (event) {
+      if (event.senderId != null) talkingSenderIds[String(event.senderId)] = true;
       handleMessage(event.data, event.senderId);
     });
     castContext.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function () {
@@ -1339,9 +1358,23 @@
     // The phones still connected learn the new count (connectedSenders). Sent again a moment later in
     // case the framework still lists the leaving phone while this event runs.
     if (cast.framework.system.EventType.SENDER_DISCONNECTED) {
-      castContext.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, function () {
+      castContext.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, function (event) {
+        if (event && event.senderId != null) delete talkingSenderIds[String(event.senderId)];
         sendStatus();
         setTimeout(sendStatus, 1000);
+      });
+    }
+    // Google's framework stops the receiver when the last phone leaves on purpose (Disconnect: reason
+    // "requested_by_sender"), which closed the gallery on Android (Galaxy test 2026-10-17, 11:10:37). Disconnect
+    // promises the TV keeps playing (hooks/useCastSession.ts), so it does; Stop casting still stops the app (the phone
+    // asks the TV to stop it), and idle.js stops a page left alone. With nothing on screen there is nothing to keep.
+    if (typeof castContext.setLastSenderDisconnectedHandler === "function") {
+      castContext.setLastSenderDisconnectedHandler(function () {
+        if (hasContent()) {
+          console.log("[KULTURA] last phone disconnected: playing on");
+          return;
+        }
+        castContext.stop();
       });
     }
 
