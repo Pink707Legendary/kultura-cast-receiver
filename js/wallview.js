@@ -122,7 +122,7 @@
     /** The stop on screen lost its close-up (its detail image was late or failed): never re-plan it back. */
     var closeUpDropped = false;
     var stopIndex = 0;
-    var anims = null; // { clock, caption, title, light, detail, move, timer }
+    var anims = null; // { clock, caption, title, light, detail, move, spotFade, spotMove, timer }
     var pieceEls = []; // per piece index: { node, frame, img, src (url while loaded), lod, layer }
     var imagePlan = { pieceIndexes: [], estimatedBytes: 0, wanted: 0 };
     /** Detail images by tour position: { position, img, state, natural, url, fallbackUsed, wrapper }. */
@@ -148,6 +148,12 @@
     var lodPreload = [];
     /** The still view the layers and frame levels were last planned for (diagnostics). */
     var renderPlan = { layers: 0, lods: {}, plannedAtMs: null, views: 0 };
+    /**
+     * Spotlight overlays (walltour.js "Spotlight") by tour position, at most two (the stop on screen and the next):
+     * { position, img, plan, strength }. Each is one small mask image in front of the wall, its own layer, shown only
+     * from the camera's arrival on (never during a glide), faded by opacity and moved with the close-up.
+     */
+    var spots = {};
 
     // ─── Building the wall ───
 
@@ -204,8 +210,12 @@
         node.style.width = px(p.w * L);
         node.style.height = px(p.h * L);
         node.style.setProperty("--band", px(p.drawnBand * L));
+        var isCanvas = p.frame === "canvas";
         var shadow = el("div", "wp-shadow", node);
-        applyShadow(shadow, p.frame === "canvas" ? "canvas" : "frame", p.w / WEBSITE_PX_PT, p.h / WEBSITE_PX_PT, uPx);
+        // A canvas casts its shadow from its face and side edge only (as the phone does): its outermost band is empty
+        // wall, and a shadow around the whole box left a strip of bare wall between the side edge and the shadow.
+        var shadowInset = isCanvas ? p.drawnBand : 0;
+        applyShadow(shadow, isCanvas ? "canvas" : "frame", (p.w - shadowInset) / WEBSITE_PX_PT, (p.h - shadowInset) / WEBSITE_PX_PT, uPx);
         var canvas = el("div", "wp-canvas", node);
         canvas.style.left = px((p.inner.x - p.x) * L);
         canvas.style.top = px((p.inner.y - p.y) * L);
@@ -219,9 +229,11 @@
         applyShadow(lip, Render.lipKind(p.frame), p.inner.w / WEBSITE_PX_PT, p.inner.h / WEBSITE_PX_PT, uPx);
         var frame = el("div", "wp-frame", node);
         frame.setAttribute("data-frame", p.frame);
-        if (p.frame === "canvas") {
+        if (isCanvas) {
           var side = mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE);
           frame.style.borderColor = side + " " + side + " " + mix(p.mainColor, "#0b0a09", CANVAS_EDGE_SHARE * 0.67);
+          // The face's backing (receiver.css .wp-canvas) is the side edge's colour, on the right and below only.
+          canvas.style.boxShadow = "1px 1px 0 1px " + side;
         }
         pieceEls[p.index] = { node: node, frame: frame, img: img, src: null, lod: null, layer: false, hold: false, rasterZoom: 0 };
         img.onerror = function () {
@@ -236,7 +248,14 @@
     function shadowUrl(kind, boxW, boxH, pxPerU) {
       var key = kind + ":" + boxW + "x" + boxH + "@" + pxPerU;
       if (shadowImages[key]) return shadowImages[key].url;
-      var image = Render.shadowImage(kind, boxW, boxH, pxPerU);
+      var url = alphaImageUrl(Render.shadowImage(kind, boxW, boxH, pxPerU));
+      if (!url) return null; // no 2D canvas: applyShadow falls back to the CSS blurs
+      shadowImages[key] = { url: url };
+      return url;
+    }
+
+    /** A PNG data URL of black with alpha `image.alpha` ({ width, height, alpha }), or null without a 2D canvas. */
+    function alphaImageUrl(image) {
       var canvasEl = document.createElement("canvas");
       canvasEl.width = image.width;
       canvasEl.height = image.height;
@@ -246,13 +265,12 @@
       } catch (e) {
         ctx = null;
       }
-      if (!ctx) return null; // no 2D canvas: applyShadow falls back to the CSS blurs
+      if (!ctx) return null;
       var data = ctx.createImageData(image.width, image.height);
       for (var i = 0; i < image.alpha.length; i++) data.data[i * 4 + 3] = image.alpha[i];
       ctx.putImageData(data, 0, 0);
       var url = canvasEl.toDataURL("image/png");
       canvasEl.width = 0; // let the canvas memory go now
-      shadowImages[key] = { url: url };
       return url;
     }
 
@@ -613,6 +631,100 @@
       }
     }
 
+    // ─── Spotlight (walltour.js "Spotlight") ───
+
+    function spotlightOn() {
+      return renderFlags.spotlight !== false;
+    }
+
+    function spotlightStrength() {
+      return renderFlags.spotlightStrength != null ? renderFlags.spotlightStrength : Tour.SPOTLIGHT_STRENGTH;
+    }
+
+    /** The spotlight overlay of tour position `position`, made now if needed (a small image: a few ms). */
+    function spotFor(position) {
+      var strength = spotlightStrength();
+      var kept = spots[position];
+      if (kept && kept.strength === strength) return kept;
+      if (kept) releaseSpot(kept);
+      var plan = Tour.spotlightPlan(tour, position);
+      var url = alphaImageUrl(Render.spotlightMask(plan.rect, plan.overlay, plan.feather, strength));
+      if (!url) return null;
+      var img = el("img", "wall-spot");
+      img.alt = "";
+      img.style.width = px(plan.overlay.w);
+      img.style.height = px(plan.overlay.h);
+      img.style.transform = Tour.transformString(Tour.spotlightTransform(tour.stops[position], tour.stops[position], tour, plan.overlay));
+      img.src = url;
+      stage.insertBefore(img, light);
+      var slot = { position: position, img: img, plan: plan, strength: strength };
+      spots[position] = slot;
+      return slot;
+    }
+
+    function releaseSpot(slot) {
+      if (slot.img.parentNode) slot.img.parentNode.removeChild(slot.img);
+      slot.img.removeAttribute("src");
+      if (spots[slot.position] === slot) delete spots[slot.position];
+    }
+
+    /** Hide every overlay and keep only those of `position` and the next stop. */
+    function manageSpots(position) {
+      var next = (position + 1) % tour.order.length;
+      Object.keys(spots).forEach(function (key) {
+        var slot = spots[key];
+        slot.img.style.visibility = "";
+        if (slot.position !== position && slot.position !== next) releaseSpot(slot);
+      });
+    }
+
+    /** The stop on screen's overlay, if it is showing. */
+    function shownSpot() {
+      var slot = spots[stopIndex];
+      return slot && anims && anims.spotFade && anims.spotFade.spot === slot ? slot : null;
+    }
+
+    /** From the camera's arrival on: show the stop's overlay (fade from the stop's clock, placed for time `t`). */
+    function attachSpot(t) {
+      if (!anims || !stop || shownSpot() || !spotlightOn() || t < stop.arrivalMs - 1) return;
+      var slot = spotFor(stopIndex);
+      if (!slot) return;
+      if (anims.spotFade) anims.spotFade.cancel();
+      var fade = slot.img.animate(Tour.windowKeyframes(stop, stop.windows.spotlight, 0, 1), { duration: stop.durationMs, fill: "forwards" });
+      fade.spot = slot;
+      fade.currentTime = t;
+      if (frozen()) fade.pause();
+      anims.spotFade = fade;
+      slot.img.style.visibility = "visible";
+      placeSpot(t);
+    }
+
+    /** Keep the shown overlay on the painting: static during holds, moving with the camera during the close-up. */
+    function placeSpot(t) {
+      var slot = shownSpot();
+      if (!slot) return;
+      var seg = Tour.segmentAt(stop, t);
+      var stopCam = tour.stops[stopIndex];
+      var overlay = slot.plan.overlay;
+      if (!seg.move) {
+        slot.img.style.transform = Tour.transformString(Tour.spotlightTransform(seg.from, stopCam, tour, overlay));
+        if (anims.spotMove) {
+          anims.spotMove.cancel();
+          anims.spotMove = null;
+        }
+        return;
+      }
+      if (!anims.spotMove || anims.spotMove.segment !== seg) {
+        if (anims.spotMove) anims.spotMove.cancel();
+        var move = slot.img.animate(Tour.spotlightKeyframes(seg, stopCam, tour, overlay), { duration: seg.endMs - seg.startMs, easing: seg.easing, fill: "forwards" });
+        move.segment = seg;
+        anims.spotMove = move;
+      }
+      anims.spotMove.currentTime = t - seg.startMs;
+      if (frozen()) anims.spotMove.pause();
+      else anims.spotMove.play();
+    }
+
     // ─── Stops ───
 
     /** Paused and not finishing a NEXT / PREVIOUS glide. */
@@ -637,7 +749,7 @@
       clearTimeout(stillWorkTimer);
       if (!anims) return;
       clearTimeout(anims.timer);
-      cancelAll([anims.clock, anims.caption, anims.title, anims.light, anims.detail, anims.move]);
+      cancelAll([anims.clock, anims.caption, anims.title, anims.light, anims.detail, anims.move, anims.spotFade, anims.spotMove]);
       anims = null;
     }
 
@@ -686,6 +798,7 @@
       if (from) camera.style.transform = Tour.cameraTransform(from, tour);
       stopIndex = position;
       var slot = manageDetails(position);
+      manageSpots(position);
       stopRequest = { from: from, flow: flow, leadInMs: leadIn, seconds: settings.seconds, motion: settings.motion, natural: slot.state === "ready" ? slot.natural : null };
       closeUpDropped = false;
       var cached = nextPlan;
@@ -705,7 +818,7 @@
       titleText.textContent = (wall.sourceName || "My wall") + " · " + tour.order.length + (tour.order.length === 1 ? " artwork" : " artworks");
 
       var timing = { duration: stop.durationMs, fill: "forwards" };
-      anims = { timer: null, move: null, detail: null };
+      anims = { timer: null, move: null, detail: null, spotFade: null, spotMove: null };
       anims.clock = clockEl.animate([{ visibility: "visible" }, { visibility: "visible" }], timing);
       anims.clock.onfinish = function () {
         if (token === stopToken) advance();
@@ -730,10 +843,17 @@
         a.currentTime = t;
         if (frozen()) a.pause();
       });
+      var spot = shownSpot();
+      if (spot) {
+        anims.spotFade.cancel();
+        anims.spotFade = null;
+        spot.img.style.visibility = "";
+        attachSpot(t);
+      }
     }
 
     function windowAnimations() {
-      return [anims.clock, anims.caption, anims.title, anims.light, anims.detail];
+      return [anims.clock, anims.caption, anims.title, anims.light, anims.detail, anims.spotFade];
     }
 
     function pauseAll() {
@@ -741,6 +861,7 @@
         if (a) a.pause();
       });
       if (anims.move) anims.move.pause();
+      if (anims.spotMove) anims.spotMove.pause();
       clearTimeout(anims.timer);
     }
 
@@ -819,6 +940,12 @@
         if (still) anims.move.pause();
         else anims.move.play();
       }
+      // The spotlight from the arrival on: shown by stillWork once the camera rests (or at once when paused, e.g. a
+      // SEEK), then kept on the painting here.
+      if (t >= stop.arrivalMs - 1) {
+        if (still) attachSpot(t);
+        placeSpot(t);
+      }
       if (!still) {
         var next = pauseAtArrival && t < stop.arrivalMs ? Math.min(seg.endMs, stop.arrivalMs) : seg.endMs;
         anims.timer = setTimeout(sync, Math.max(0, next - t) + 5);
@@ -836,10 +963,12 @@
       if (t < stop.arrivalMs - 1) return;
       var here = details[stopIndex];
       if (here && here.state === "ready" && !detailShown(here) && renderFlags.detailTiming !== "early") attachDetailToStop(here, clockTime());
+      attachSpot(clockTime());
       // The next stop's image: fetched and decoded while the camera holds still (the 2-image cap holds).
       if ((seg.name === "hold" || seg.name === "release") && tour.order.length > 1) {
         var nextPos = (stopIndex + 1) % tour.order.length;
         if (!details[nextPos] && !fadingSlot) detailFor(nextPos);
+        if (spotlightOn() && !spots[nextPos]) spotFor(nextPos);
         if (renderFlags.glideImage !== "wall") sharpenForGlide(tour.order[nextPos]);
       }
     }
@@ -885,6 +1014,7 @@
         "rf-no-detail": renderFlags.detail === false,
         "rf-no-wall-images": renderFlags.wallImages === false,
         "rf-no-light": renderFlags.light === false,
+        "rf-no-spotlight": renderFlags.spotlight === false,
         "rf-no-glass": renderFlags.glass === false,
         "rf-css-shadows": renderFlags.shadowStyle === "css" || shadowsLive,
       };
@@ -892,6 +1022,16 @@
       camera.style.willChange = renderFlags.willChange ? "transform" : "";
       // Layer and frame-level switches apply at once (A/B stills on the TV at the same view).
       if (tour && stop && anims) planRender(clockTime());
+      // The spotlight too: off, or remade at its new strength.
+      var spot = shownSpot();
+      if (spot && (!spotlightOn() || spot.strength !== spotlightStrength())) {
+        cancelAll([anims.spotFade, anims.spotMove]);
+        anims.spotFade = anims.spotMove = null;
+      }
+      Object.keys(spots).forEach(function (key) {
+        if (!spotlightOn() || spots[key].strength !== spotlightStrength()) releaseSpot(spots[key]);
+      });
+      if (tour && stop && anims) attachSpot(clockTime());
     }
 
     // ─── Public ───
@@ -938,6 +1078,8 @@
       Object.keys(details).forEach(function (k) { releaseDetail(details[k]); });
       details = {};
       fadingSlot = null;
+      Object.keys(spots).forEach(function (k) { releaseSpot(spots[k]); });
+      spots = {};
       pieceEls.forEach(function (entry) {
         entry.img.onerror = null;
         entry.img.removeAttribute("src");
@@ -1045,6 +1187,16 @@
         renderFlags: renderFlags,
         // Paintings with their own layer now, and how many frames use each moulding level (wallrender.js).
         render: renderPlan,
+        spotlight: {
+          on: spotlightOn(),
+          strength: spotlightStrength(),
+          shown: !!shownSpot(),
+          opacity: stop && stop.windows.spotlight ? round(Tour.windowOpacityAt(stop.windows.spotlight, t, 0, 1), 3) : 0,
+          rect: shownSpot()
+            ? { x0: round(shownSpot().plan.rect.x0, 1), y0: round(shownSpot().plan.rect.y0, 1), x1: round(shownSpot().plan.rect.x1, 1), y1: round(shownSpot().plan.rect.y1, 1) }
+            : null,
+          held: Object.keys(spots).length,
+        },
       };
     }
 

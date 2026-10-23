@@ -43,6 +43,8 @@
     detail: "boolean", // the visited painting's large image
     wallImages: "boolean", // the pieces' small images (their main colour stays)
     light: "boolean", // the room light overlay (fixed to the viewer)
+    spotlight: "boolean", // the spotlight at a stop (walltour.js "Spotlight"; on by default)
+    spotlightStrength: [0, 0.9], // its darkness (alpha of black beyond the lit area; default walltour.js SPOTLIGHT_STRENGTH)
     glass: "boolean", // the blurred glass (backdrop-filter) of the wall caption and title
     willChange: "boolean", // will-change: transform on the camera
     overscanPt: [0, 20000], // how far the covering runs beyond the paintings (wall points); applied at the next wall

@@ -250,6 +250,9 @@
     return picked.slice(0, cap);
   }
 
+  /** Spotlight mask resolution: image px per CSS px (a quarter: 360 x 203 px for the 1440 x 810 overlay). */
+  var SPOTLIGHT_MASK_PX_PER_CSS = 0.25;
+
   /** Is a camera view showing (part of) piece `p` (wall points), with `margin` share of the view added? */
   function viewShows(cam, p, screen, margin) {
     var halfW = (screen.width / 2 / cam.zoom) * (1 + 2 * (margin || 0));
@@ -257,8 +260,37 @@
     return p.x < cam.cx + halfW && p.x + p.w > cam.cx - halfW && p.y < cam.cy + halfH && p.y + p.h > cam.cy - halfH;
   }
 
+  /**
+   * The spotlight's mask (walltour.js "Spotlight"; the overlay wallview.js draws as ONE image fixed to the screen, so
+   * the TV never re-rasters it: it is only faded and, during the close-up, moved). Black at alpha 0 inside the lit
+   * rect `rect` ({ x0, y0, x1, y1 }, CSS px), rising smoothly to `strength` over `feather` CSS px beyond it (the
+   * distance to the rect: its dark edge is a rounded rectangle). `overlay` { x, y, w, h } (CSS px) is the area the
+   * image covers; one image px per 1 / SPOTLIGHT_MASK_PX_PER_CSS CSS px (a soft gradient: the GPU's bilinear
+   * scaling is invisible). Returns { width, height, alpha } (alpha: one byte per px, rows top to bottom).
+   */
+  function spotlightMask(rect, overlay, feather, strength) {
+    var scale = SPOTLIGHT_MASK_PX_PER_CSS;
+    var width = Math.max(1, Math.round(overlay.w * scale));
+    var height = Math.max(1, Math.round(overlay.h * scale));
+    var alpha = new Uint8ClampedArray(width * height);
+    var full = Math.max(0, Math.min(1, strength)) * 255;
+    var f = Math.max(feather, 1e-6);
+    for (var j = 0; j < height; j++) {
+      var y = overlay.y + ((j + 0.5) / height) * overlay.h;
+      var dy = Math.max(rect.y0 - y, 0, y - rect.y1);
+      for (var i = 0; i < width; i++) {
+        var x = overlay.x + ((i + 0.5) / width) * overlay.w;
+        var dx = Math.max(rect.x0 - x, 0, x - rect.x1);
+        var u = Math.min(1, Math.sqrt(dx * dx + dy * dy) / f);
+        alpha[j * width + i] = Math.round(full * u * u * (3 - 2 * u));
+      }
+    }
+    return { width: width, height: height, alpha: alpha };
+  }
+
   var api = {
     SIGMA_PER_BLUR: SIGMA_PER_BLUR,
+    SPOTLIGHT_MASK_PX_PER_CSS: SPOTLIGHT_MASK_PX_PER_CSS,
     SHADOW_SPECS: SHADOW_SPECS,
     PX_PER_U: PX_PER_U,
     FRAME_LOD_LEVELS: FRAME_LOD_LEVELS,
@@ -275,6 +307,7 @@
     frameLod: frameLod,
     pieceLayerPlan: pieceLayerPlan,
     viewShows: viewShows,
+    spotlightMask: spotlightMask,
   };
 
   if (typeof module !== "undefined" && module.exports) {

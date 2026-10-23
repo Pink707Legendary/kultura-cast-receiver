@@ -362,14 +362,21 @@ html, body {
 }
 
 .rf-css-shadows .wp[data-frame="canvas"] .wp-shadow {
+  width: calc(100% - var(--band)) !important;
+  height: calc(100% - var(--band)) !important;
   box-shadow: calc(16 * var(--u)) calc(30 * var(--u)) calc(38 * var(--u)) calc(-10 * var(--u)) rgba(0, 0, 0, 0.72),
     calc(5 * var(--u)) calc(9 * var(--u)) calc(14 * var(--u)) rgba(0, 0, 0, 0.42);
 }
 
-/* The painting itself; its main colour shows until (or instead of) the small image (memory budget). */
+/* The painting itself; its main colour shows until (or instead of) the small image (memory budget).
+   Its backing: two layout px of the moulding's dark inner edge just outside the face, hidden under the frame. Chrome
+   draws a border (moulding or canvas side edge) at whole device px, up to one thinner than --band, and the border
+   stays on its outer line: without the backing a hairline of wall showed between the painting and its frame, wider
+   when the camera is close (Sony, 2026-10-15). A canvas's backing is its side edge, right and below (wallview.js). */
 .wp-canvas {
   position: absolute;
   overflow: hidden;
+  box-shadow: 0 0 0 2px #0d0c0b;
 }
 
 /* An image taken back (memory budget) or failed shows the painting's colour, never a broken-image icon. */
@@ -467,6 +474,20 @@ html, body {
     radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(0, 0, 0, 0.42) 100%);
 }
 
+/* The spotlight at a stop (walltour.js "Spotlight"): ONE small mask image (black, alpha) fixed to the screen in
+   front of the wall, its own layer; shown (wallview.js) only from the camera's arrival, faded by opacity and moved
+   with the close-up by transform. Never filters or blurs. */
+.wall-spot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+  visibility: hidden;
+  will-change: transform;
+  opacity: 0;
+}
+
 /* "<name> · N artworks" over the opening shot: the wall label's glass, top-left. */
 .wall-title {
   top: 6vh;
@@ -479,7 +500,8 @@ html, body {
 .rf-no-lips .wp-lip,
 .rf-frames-none .wp-frame,
 .rf-no-detail .wall-detail,
-.rf-no-light .wall-light {
+.rf-no-light .wall-light,
+.rf-no-spotlight .wall-spot {
   display: none;
 }
 .rf-no-wall-images .wp-canvas img {
